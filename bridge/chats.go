@@ -226,6 +226,7 @@ func (b *Bridge) forget(chat string, upTo int64, deleted bool) {
 	}
 	n, _ := res.RowsAffected()
 	b.db.Exec(`DELETE FROM media WHERE chat = ? AND id NOT IN (SELECT id FROM messages WHERE chat = ?)`, chat, chat)
+	b.db.Exec(`DELETE FROM reactions WHERE chat = ? AND id NOT IN (SELECT id FROM messages WHERE chat = ?)`, chat, chat)
 	var left int
 	b.db.QueryRow(`SELECT count(*) FROM messages WHERE chat = ?`, chat).Scan(&left)
 	switch {
@@ -315,6 +316,10 @@ func (b *Bridge) appStateEvent(raw any) {
 	case *events.DeleteChat:
 		if chat, ok := b.stateChat(e.JID); ok {
 			b.forget(chat, upTo(e.Action.GetMessageRange(), e.Timestamp), true)
+		}
+	case *events.DeleteForMe:
+		if chat, ok := b.stateChat(e.ChatJID); ok {
+			b.removeMsgs(chat, []string{e.MessageID})
 		}
 	case *events.UnarchiveChatsSetting:
 		on := "0"

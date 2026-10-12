@@ -14,26 +14,20 @@ use image::{DynamicImage, Rgba, RgbaImage};
 use ratatui_image::{Image, Resize};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-// WhatsApp Web's dark theme.
-pub(crate) const GREEN: Color = Color::Rgb(0x25, 0xD3, 0x66);
+// WhatsApp Web's dark theme; the greens follow the terminal's (`theme`).
+pub(crate) use crate::theme::{bubble_out, chip_on, chip_on_text, code_out, green, link_out, meta_out, rule_out};
 const BUBBLE_IN: Color = Color::Rgb(0x24, 0x26, 0x26);
-const BUBBLE_OUT: Color = Color::Rgb(0x14, 0x4D, 0x37);
 /// Monospace and code: a shade off each bubble, as on WhatsApp Web.
 const CODE_IN: Color = Color::Rgb(0x33, 0x36, 0x36);
-const CODE_OUT: Color = Color::Rgb(0x0E, 0x3A, 0x29);
 pub(crate) const TEXT: Color = Color::Rgb(0xFA, 0xFA, 0xFA);
 /// 60% white over each bubble.
 pub(crate) const META_IN: Color = Color::Rgb(0xA7, 0xA8, 0xA8);
-const META_OUT: Color = Color::Rgb(0xA1, 0xB8, 0xAF);
 const READ_BLUE: Color = Color::Rgb(0x53, 0xBD, 0xEB);
 /// Links: WhatsApp's blue on the grey bubbles, a light green on our own.
 pub(crate) const LINK_IN: Color = Color::Rgb(0x53, 0xBD, 0xEB);
-const LINK_OUT: Color = Color::Rgb(0x7F, 0xD8, 0xA8);
 pub(crate) const DAY_PILL: Color = Color::Rgb(0x1D, 0x1F, 0x1F);
 pub(crate) const FIELD: Color = Color::Rgb(0x24, 0x26, 0x26);
 const SELECTED: Color = Color::Rgb(0x2E, 0x2F, 0x2F);
-const CHIP_ON: Color = Color::Rgb(0x10, 0x35, 0x29);
-const CHIP_ON_TEXT: Color = Color::Rgb(0xD9, 0xFD, 0xD3);
 const NAMES: [Color; 8] = [
     Color::Rgb(0xE5, 0x7A, 0x5F),
     Color::Rgb(0x53, 0xBD, 0xEB),
@@ -62,7 +56,6 @@ const CHECK: &str = "\u{f0791}";
 const CHECK_BLUE: Color = Color::Rgb(0x1D, 0x9B, 0xF0);
 /// The rule over a business's buttons, on each bubble.
 const RULE_IN: Color = Color::Rgb(0x3A, 0x3D, 0x3E);
-const RULE_OUT: Color = Color::Rgb(0x2B, 0x60, 0x4B);
 const LINK_ICON: &str = "\u{f08e}";
 const REPLY_ICON: &str = "\u{f112}";
 const CALL_ICON: &str = "\u{f095}";
@@ -352,7 +345,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         return main_view(f, app, area);
     }
     match &app.phase {
-        Phase::Qr(code) => qr_view(f, code, area),
+        Phase::Qr(code) => {
+            let code = code.clone();
+            qr_view(f, app, &code, area)
+        }
         Phase::LoggedOut if app.account.signing_out => center(f, area, vec![Line::from("Aparelho desconectado. Gerando um QR novo…")]),
         Phase::LoggedOut => center(f, area, vec![Line::from("Sessão encerrada no celular. Gerando um QR novo…")]),
         Phase::Dead(why) => center(
@@ -360,7 +356,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             area,
             vec![Line::from(why.clone()).red(), Line::default(), Line::from("r reinicia · q sai").style(dim())],
         ),
-        _ => center(f, area, vec![Line::from(vec![Span::styled("WhatsApp TUI", Style::new().fg(GREEN).bold()), Span::raw("  conectando ao WhatsApp…")])]),
+        _ => center(f, area, vec![Line::from(vec![Span::styled("WhatsApp TUI", Style::new().fg(green()).bold()), Span::raw("  conectando ao WhatsApp…")])]),
     }
 }
 
@@ -370,7 +366,7 @@ fn center(f: &mut Frame, area: Rect, lines: Vec<Line>) {
     f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), Rect { y, height: h.min(area.height), ..area });
 }
 
-fn qr_view(f: &mut Frame, code: &str, area: Rect) {
+fn qr_view(f: &mut Frame, app: &mut App, code: &str, area: Rect) {
     let Ok(qr) = qrcode::QrCode::new(code.as_bytes()) else {
         return center(f, area, vec![Line::from("QR inválido")]);
     };
@@ -381,6 +377,14 @@ fn qr_view(f: &mut Frame, code: &str, area: Rect) {
     let dark = |x: usize, y: usize| {
         x >= QUIET && y >= QUIET && x < w + QUIET && y < w + QUIET && colors[(y - QUIET) * w + (x - QUIET)] == qrcode::Color::Dark
     };
+    let text = [
+        Line::from("Escaneie com o WhatsApp do celular").bold(),
+        Line::from("Configurações › Aparelhos conectados › Conectar um aparelho").style(dim()),
+        Line::from("q sai").style(dim()),
+    ];
+    if qr_picture(f, app, code, total, &dark, area, &text) {
+        return;
+    }
     let rows = total.div_ceil(2);
     let text = [
         Line::from("Escaneie com o WhatsApp do celular").bold(),
@@ -390,16 +394,60 @@ fn qr_view(f: &mut Frame, code: &str, area: Rect) {
     if (area.width as usize) < total || (area.height as usize) < rows + text.len() + 1 {
         return center(f, area, vec![Line::from(format!("Aumente o terminal para mostrar o QR (precisa de {total}×{}).", rows + 4))]);
     }
-    // Two modules per cell: the upper one in the foreground, the lower in the
-    // background, in fixed black and white so any theme reads it.
-    let paint = |d: bool| if d { Color::Rgb(0, 0, 0) } else { Color::Rgb(255, 255, 255) };
+    // Two modules per cell, in the terminal's own colors: its text's for the
+    // light ones, its background for the dark.
+    let glyph = |up: bool, down: bool| match (!up, !down) {
+        (true, true) => "█",
+        (true, false) => "▀",
+        (false, true) => "▄",
+        (false, false) => " ",
+    };
     let mut lines: Vec<Line> = (0..total)
         .step_by(2)
-        .map(|y| Line::from((0..total).map(|x| Span::styled("▀", Style::new().fg(paint(dark(x, y))).bg(paint(dark(x, y + 1))))).collect::<Vec<_>>()))
+        .map(|y| Line::from((0..total).map(|x| Span::raw(glyph(dark(x, y), dark(x, y + 1)))).collect::<Vec<_>>()))
         .collect();
     lines.push(Line::default());
     lines.extend(text);
     center(f, area, lines);
+}
+
+/// The QR code as a picture, small and sharp: a few pixels a module, in the
+/// theme's text color (light) and background (dark), the text under it.
+/// False without pictures in the terminal.
+fn qr_picture(f: &mut Frame, app: &mut App, code: &str, total: usize, dark: &dyn Fn(usize, usize) -> bool, area: Rect, text: &[Line<'static>]) -> bool {
+    let Some((cw, ch)) = cell_px(app) else { return false };
+    let (light, back) = crate::theme::fg_bg().unwrap_or(([0xFF; 3], [0; 3]));
+    // About a fifth of a row a module: small, and still well over what a
+    // phone's camera needs.
+    let m = (ch / 5).max(3);
+    let side = total as u32 * m;
+    let (cols, rows) = (side.div_ceil(cw) as u16, side.div_ceil(ch) as u16);
+    let h = rows + 1 + text.len() as u16;
+    if area.width < cols || area.height < h {
+        return false;
+    }
+    let key = (format!("qr-{code}-{light:?}-{back:?}"), cols, rows);
+    if !app.protocols.contains_key(&key) {
+        // The cells' whole size, the code in the middle, the rest see-through.
+        let (w, hp) = (cols as u32 * cw, rows as u32 * ch);
+        let (ox, oy) = ((w - side) / 2, (hp - side) / 2);
+        let mut img = RgbaImage::new(w, hp);
+        for y in 0..side {
+            for x in 0..side {
+                let c = if dark((x / m) as usize, (y / m) as usize) { back } else { light };
+                img.put_pixel(ox + x, oy + y, Rgba([c[0], c[1], c[2], 255]));
+            }
+        }
+        let Some(picker) = app.picker.as_ref() else { return false };
+        let Ok(p) = picker.new_protocol(DynamicImage::ImageRgba8(img), Rect::new(0, 0, cols, rows).into(), Resize::Fit(None)) else { return false };
+        app.protocols.insert(key.clone(), p);
+    }
+    let y = area.y + (area.height - h) / 2;
+    let x = area.x + (area.width - cols) / 2;
+    f.render_widget(Image::new(&app.protocols[&key]), Rect::new(x, y, cols, rows));
+    let r = Rect { y: y + rows + 1, height: text.len() as u16, ..area };
+    f.render_widget(Paragraph::new(text.to_vec()).alignment(Alignment::Center), r);
+    true
 }
 
 /// The avatar's size in cells, two rows tall and square in pixels; None
@@ -480,13 +528,15 @@ fn main_view(f: &mut Frame, app: &mut App, area: Rect) {
             profile_panel(f, app, conv, false);
         }
     }
+    crate::react::draw(f, app);
+    crate::msgmenu::draw(f, app);
     crate::emoji::draw(f, app);
     crate::emoji_panel::draw(f, app);
     crate::attach::draw_menu(f, app);
     crate::chatmenu::draw(f, app);
     crate::account::draw(f, app);
     // Last, so only what's still a link on screen becomes one for the terminal.
-    let is_link = |c: &ratatui::buffer::Cell| c.modifier.contains(Modifier::UNDERLINED) && (c.fg == LINK_IN || c.fg == LINK_OUT);
+    let is_link = |c: &ratatui::buffer::Cell| c.modifier.contains(Modifier::UNDERLINED) && (c.fg == LINK_IN || c.fg == link_out());
     for (r, url) in &app.msg_links {
         crate::links::osc8(f.buffer_mut(), *r, url, is_link);
     }
@@ -516,7 +566,7 @@ fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         (app.search.clone(), TEXT)
     };
-    let icon_fg = if searching { GREEN } else { META_IN };
+    let icon_fg = if searching { green() } else { META_IN };
     let text = truncate(&text, inside.saturating_sub(4));
     let pad = inside.saturating_sub(3 + text.width());
     let end = |glyph| if tall.is_some() { Span::raw(" ".repeat(cap)) } else { Span::styled(glyph, Style::new().fg(FIELD)) };
@@ -540,7 +590,7 @@ fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     // Four of them: without the space inside the pills when the column is narrow.
     let tight = 1 + chips.iter().map(|(_, l)| l.width() + 5).sum::<usize>() > area.width as usize;
     for (filter, label) in chips {
-        let (fg, bg) = if app.filter == filter { (CHIP_ON_TEXT, CHIP_ON) } else { (META_IN, FIELD) };
+        let (fg, bg) = if app.filter == filter { (chip_on_text(), chip_on()) } else { (META_IN, FIELD) };
         let text = if tight { label } else { format!(" {label} ") };
         let w = text.width() as u16 + 2;
         if x + w <= area.right() {
@@ -623,12 +673,12 @@ fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         let key = item.key();
         let on = key.is_some() && key == lit;
         match item {
-            Item::Header(t) => lines.push(Line::from(Span::styled(format!(" {t}"), Style::new().fg(GREEN)))),
+            Item::Header(t) => lines.push(Line::from(Span::styled(format!(" {t}"), Style::new().fg(green())))),
             Item::Info(t) => lines.push(Line::from(Span::styled(format!(" {t}"), Style::new().fg(META_IN)))),
             Item::Archived => {
                 // How many archived chats wait, green while any does.
                 let n = app.chats.iter().filter(|c| c.archived && c.unread > 0).count();
-                let count = Span::styled(n.to_string(), Style::new().fg(if n > 0 { GREEN } else { META_IN }));
+                let count = Span::styled(n.to_string(), Style::new().fg(if n > 0 { green() } else { META_IN }));
                 lines.push(lead_row(crate::chatmenu::ARCHIVE, Span::styled("Arquivadas", Style::new().fg(TEXT)), Some(count), width, avatar_w, on));
             }
             Item::Back => lines.push(lead_row("←", Span::styled("Arquivadas", Style::new().fg(TEXT).bold()), None, width, avatar_w, on)),
@@ -647,7 +697,7 @@ fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
             }
             Item::Number(n) => {
                 let (sub, style) = if n.exists {
-                    ("Começar uma conversa", Style::new().fg(GREEN))
+                    ("Começar uma conversa", Style::new().fg(green()))
                 } else {
                     ("Este número não está no WhatsApp", Style::new().fg(META_IN))
                 };
@@ -802,7 +852,7 @@ fn message_item(m: &Msg, chat: &str, query: &str, width: usize, lit: bool) -> [L
             let end = (rel + q.len()).min(chars.len());
             let rel = rel.min(end);
             spans.push(Span::styled(chars[..rel].iter().collect::<String>(), plain));
-            spans.push(Span::styled(chars[rel..end].iter().collect::<String>(), Style::new().fg(GREEN).bold()));
+            spans.push(Span::styled(chars[rel..end].iter().collect::<String>(), Style::new().fg(green()).bold()));
             spans.push(Span::styled(chars[end..].iter().collect::<String>(), plain));
         }
         None => spans.push(Span::styled(shown, plain)),
@@ -837,7 +887,7 @@ fn chat_item(c: &Chat, width: usize, avatar: Option<u16>, lit: bool, typing: boo
     let chevron = if lit { format!(" {DOWN}") } else { String::new() };
     let name = truncate(&display_name(&c.name, &c.jid), inner.saturating_sub(time.width() + chevron.width() + 1));
     let gap = inner.saturating_sub(name.width() + time.width() + chevron.width());
-    let time_style = if unread && !c.muted { Style::new().fg(GREEN) } else { Style::new().fg(META_IN) };
+    let time_style = if unread && !c.muted { Style::new().fg(green()) } else { Style::new().fg(META_IN) };
     let top = Line::from(vec![
         Span::raw(lead.clone()),
         Span::styled(name, name_style),
@@ -863,18 +913,18 @@ fn chat_item(c: &Chat, width: usize, avatar: Option<u16>, lit: bool, typing: boo
         if !right.is_empty() {
             right.push(Span::raw(" "));
         }
-        let badge = if c.muted { META_IN } else { GREEN };
+        let badge = if c.muted { META_IN } else { green() };
         right.extend(pill(c.unread.to_string(), Color::Black, badge));
     }
     let right_w: usize = right.iter().map(|s| s.content.width()).sum();
     let mut left: Vec<Span> = vec![Span::raw(lead)];
     let room = inner.saturating_sub(right_w + 1);
     if typing {
-        left.push(Span::styled(truncate("digitando…", room), Style::new().fg(GREEN)));
+        left.push(Span::styled(truncate("digitando…", room), Style::new().fg(green())));
     } else if let Some(d) = draft {
         // What was left unsent, in place of the last message, as on the Web.
         let label = "Rascunho: ";
-        left.push(Span::styled(truncate(label, room), Style::new().fg(GREEN).bold()));
+        left.push(Span::styled(truncate(label, room), Style::new().fg(green()).bold()));
         left.push(Span::styled(truncate(&d, room.saturating_sub(label.width())), Style::new().fg(META_IN)));
     } else {
         let mut room = room;
@@ -895,6 +945,13 @@ fn chat_item(c: &Chat, width: usize, avatar: Option<u16>, lit: bool, typing: boo
     [top, Line::from(left).style(bg)]
 }
 
+/// A sticker's height in rows: about WhatsApp Web's 190 px.
+const STICKER_ROWS: u16 = 7;
+
+/// How long a message gone to stays lit, the last of it fading.
+const FLASH_SECS: f32 = 2.5;
+const FADE_SECS: f32 = 1.0;
+
 fn conversation(f: &mut Frame, app: &mut App, area: Rect) {
     let Some(jid) = app.open.clone() else {
         app.msgs_area = Rect::default();
@@ -905,7 +962,7 @@ fn conversation(f: &mut Frame, app: &mut App, area: Rect) {
             f,
             area,
             vec![
-                Line::from("WhatsApp TUI").fg(GREEN).bold(),
+                Line::from("WhatsApp TUI").fg(green()).bold(),
                 Line::default(),
                 Line::from("Escolha uma conversa à esquerda").style(dim()),
                 Line::from("↑↓ navega · Enter abre · / busca · ? atalhos").style(dim()),
@@ -916,14 +973,26 @@ fn conversation(f: &mut Frame, app: &mut App, area: Rect) {
     let group = jid.ends_with("@g.us");
     let read_only = chat.as_ref().map(|c| c.read_only.clone()).unwrap_or_default();
 
-    let input_h = if read_only.is_empty() {
-        input_lines(&app.input, area.width.saturating_sub(8) as usize).len().clamp(1, 6) as u16 + 4 + crate::attach::rows(app)
+    let selecting = app.msg_menu.selecting(&jid);
+    let editing = if app.msg_menu.editing(&jid) { 2 } else { 0 };
+    let input_h = if selecting {
+        3
+    } else if read_only.is_empty() {
+        input_lines(&app.input, area.width.saturating_sub(8) as usize).len().clamp(1, 6) as u16 + 4 + crate::attach::rows(app) + editing
     } else {
         3
     };
     let [header, msgs_area, input] =
         Layout::vertical([Constraint::Length(3), Constraint::Min(1), Constraint::Length(input_h)]).areas(area);
     app.msgs_area = msgs_area;
+    // Selecting, the bubbles move over for a column of checkboxes.
+    let full_msgs = msgs_area;
+    let msgs_area = if selecting {
+        let cw = crate::msgmenu::CHECK_W.min(msgs_area.width / 2);
+        Rect { x: msgs_area.x + cw, width: msgs_area.width - cw, ..msgs_area }
+    } else {
+        msgs_area
+    };
     app.input_area = input;
     app.attach_btn = Rect::default();
     app.emoji_btn = Rect::default();
@@ -936,8 +1005,8 @@ fn conversation(f: &mut Frame, app: &mut App, area: Rect) {
     let name = display_name(&app.name_of(&jid).unwrap_or_else(|| phone(&jid)), &jid);
     let number = phone(&jid);
     let sub = match app.typing.get(&jid) {
-        Some((who, _)) if group => Span::styled(format!("{who} está digitando…"), Style::new().fg(GREEN)),
-        Some(_) => Span::styled("digitando…", Style::new().fg(GREEN)),
+        Some((who, _)) if group => Span::styled(format!("{who} está digitando…"), Style::new().fg(green())),
+        Some(_) => Span::styled("digitando…", Style::new().fg(green())),
         None if jid == "0@s.whatsapp.net" => Span::styled("Conta oficial do WhatsApp", Style::new().fg(META_IN)),
         None if group => Span::styled("clique para ver os dados do grupo", Style::new().fg(META_IN)),
         None if name == number => Span::styled("clique para ver os dados do contato", Style::new().fg(META_IN)),
@@ -964,7 +1033,9 @@ fn conversation(f: &mut Frame, app: &mut App, area: Rect) {
     let msgs = app.msgs.get(&jid).unwrap_or(&empty);
     let loaded = app.msgs.contains_key(&jid);
     let now = app.player.now.as_ref().filter(|n| n.chat == jid);
-    let (lines, decos, starts, bigs, links, audios, pics) = message_lines(msgs, msgs_area.width as usize, group, cell_px(app), now);
+    // In a group, the sender's picture by their first bubble, as WhatsApp Web shows it.
+    let faces = cells.filter(|_| group && app.settings.on(crate::config::PHOTOS)).map(|(w, _)| w);
+    let (lines, decos, starts, bigs, links, audios, pics, senders, spots) = message_lines(msgs, msgs_area.width as usize, group, faces, cell_px(app), now);
     let h = msgs_area.height as usize;
     // From a search result: that message in the middle of the screen.
     if let Some(id) = app.jump.clone().filter(|_| loaded) {
@@ -1024,6 +1095,52 @@ fn conversation(f: &mut Frame, app: &mut App, area: Rect) {
             crate::media::draw(f, app, p, rect);
         }
     }
+    // Where the bubbles are, for the reactions and the clicks on quotes.
+    app.bubbles.clear();
+    for s in spots {
+        let (a, b) = (s.top.max(start), (s.top + s.rows).min(end));
+        if a >= b || s.x >= msgs_area.width as usize {
+            continue;
+        }
+        let w = s.w.min(msgs_area.width as usize - s.x) as u16;
+        let rect = Rect::new(msgs_area.x + s.x as u16, y_of(a), w, (b - a) as u16);
+        let quote = s.quote.and_then(|(q, n)| {
+            let (qa, qb) = (q.max(start), (q + n).min(end));
+            (qa < qb).then(|| Rect::new(rect.x + 1, y_of(qa), w.saturating_sub(3), (qb - qa) as u16))
+        });
+        app.bubbles.push(crate::react::Hit { rect, id: s.id, from_me: s.from_me, quote });
+    }
+    // The message gone to from a quote: its rows lit behind it, as WhatsApp
+    // Web does, fading after a couple of seconds.
+    if let Some((id, at)) = app.flash.clone() {
+        let t = at.elapsed().as_secs_f32();
+        match app.bubbles.iter().find(|h| h.id == id).map(|h| h.rect) {
+            _ if t >= FLASH_SECS => app.flash = None,
+            Some(r) => {
+                let glow = crate::theme::glow(((FLASH_SECS - t) / FADE_SECS).min(1.0));
+                for y in r.y..r.bottom() {
+                    for x in msgs_area.left()..msgs_area.right() {
+                        let cell = &mut f.buffer_mut()[(x, y)];
+                        if cell.bg == Color::Reset {
+                            cell.set_bg(glow);
+                        }
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    crate::msgmenu::draw_checks(f, app, full_msgs);
+    crate::react::draw_button(f, app);
+    crate::msgmenu::draw_chevron(f, app);
+    // The senders' pictures only whole, as the big emojis.
+    if let Some(w) = faces {
+        for (row, col, sender) in senders {
+            if row >= start && row + 2 <= end {
+                draw_avatar(f, app, &sender, false, Rect::new(msgs_area.x + col as u16, y_of(row), w, 2));
+            }
+        }
+    }
     // Big emojis only whole: a terminal picture can't be cut.
     for (row, col, (w, eh), text) in bigs {
         if row >= start && row + eh as usize <= end {
@@ -1042,7 +1159,15 @@ fn conversation(f: &mut Frame, app: &mut App, area: Rect) {
         app.newest_btn = r;
     }
 
-    if read_only.is_empty() {
+    if selecting {
+        crate::msgmenu::draw_select_bar(f, app, input);
+    } else if read_only.is_empty() {
+        let input = if editing > 0 {
+            crate::msgmenu::draw_edit_strip(f, app, Rect { height: editing, ..input });
+            Rect { y: input.y + editing, height: input.height - editing, ..input }
+        } else {
+            input
+        };
         input_box(f, app, input);
     } else {
         // Like WhatsApp: no box, just why.
@@ -1172,13 +1297,20 @@ pub(crate) fn caret_pos(s: &str, caret: usize, width: usize) -> (usize, usize) {
     }
 }
 
+/// The color a group gives a member's name, theirs in every message and quote.
+fn name_color(jid: &str) -> Color {
+    NAMES[jid.bytes().fold(0usize, |h, b| h.wrapping_mul(31).wrapping_add(b as usize)) % NAMES.len()]
+}
+
 /// The conversation as bubbles, a blank row between them. With pictures
 /// in the terminal their corners are rounded and the first of each run of
 /// one sender's messages has WhatsApp's tail, on its side: the returned
 /// (row, col, deco) say where those pictures go. A message of only emojis
 /// goes without a bubble, big, as (row, col, size, text).
 /// Then the links' pieces, a row each, as (row, col, width, url); then
-/// the audio players; last, the photos and videos.
+/// the audio players; the photos and videos; last, in a group, the
+/// senders' pictures by their first bubbles, as (row, col, jid); and where
+/// each message is.
 type Bubbles = (
     Vec<Line<'static>>,
     Vec<(usize, usize, Deco)>,
@@ -1187,7 +1319,21 @@ type Bubbles = (
     Vec<(usize, usize, usize, String)>,
     Vec<AudioSpot>,
     Vec<crate::media::PicSpot>,
+    Vec<(usize, usize, String)>,
+    Vec<Spot>,
 );
+
+/// Where a message is, in rows and columns of the conversation: its bubble
+/// (or big emojis) and its quote's rows, for the reactions and the clicks.
+struct Spot {
+    id: String,
+    top: usize,
+    rows: usize,
+    x: usize,
+    w: usize,
+    from_me: bool,
+    quote: Option<(usize, usize)>,
+}
 
 /// An audio bubble's player: its first row and where its icon, button and
 /// track are, for the pictures and the clicks.
@@ -1231,7 +1377,7 @@ fn audio_rows(a: &Audio, now: Option<&Now>, from_me: bool, bg: Color, meta_fg: C
     let blank = |n: usize| Span::styled(" ".repeat(n), Style::new().bg(bg));
     let icon = match cell {
         Some(_) => blank(icon_w),
-        None if a.ptt => Span::styled(MIC, on(GREEN)),
+        None if a.ptt => Span::styled(MIC, on(green())),
         None => Span::styled(HEADPHONES, on(ORANGE)),
     };
     let state = now.map(|n| n.state);
@@ -1252,7 +1398,7 @@ fn audio_rows(a: &Audio, now: Option<&Now>, from_me: bool, bg: Color, meta_fg: C
         _ => 0.0,
     };
     let knob = (frac * (track_w - 1) as f64).round() as usize;
-    let accent = if from_me { LINK_OUT } else { LINK_IN };
+    let accent = if from_me { link_out() } else { LINK_IN };
     // A cell of padding on each side: a player wants more room than text.
     let mut top = vec![blank(1), icon, blank(1), button, blank(1)];
     top.push(Span::styled("━".repeat(knob), on(accent)));
@@ -1270,7 +1416,8 @@ fn audio_rows(a: &Audio, now: Option<&Now>, from_me: bool, bg: Color, meta_fg: C
 
 /// Also where each message starts, by id. `cell` is a cell's pixels, when
 /// the terminal shows pictures; `now`, the open chat's audio playing.
-fn message_lines(msgs: &[Msg], width: usize, group: bool, cell: Option<(u32, u32)>, now: Option<&Now>) -> Bubbles {
+/// `faces`: the width of the pictures by a group's bubbles, None without them.
+fn message_lines(msgs: &[Msg], width: usize, group: bool, faces: Option<u16>, cell: Option<(u32, u32)>, now: Option<&Now>) -> Bubbles {
     let mut out: Vec<Line<'static>> = Vec::new();
     let mut decos = Vec::new();
     let mut starts = Vec::new();
@@ -1278,11 +1425,16 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, cell: Option<(u32, u32
     let mut link_cells = Vec::new();
     let mut audios = Vec::new();
     let mut pics = Vec::new();
+    let mut senders = Vec::new();
+    let mut spots = Vec::new();
     let rounded = cell.is_some();
-    if width < 16 {
-        return (out, decos, starts, bigs, link_cells, audios, pics);
+    // Others' bubbles start after the pictures' column and a blank.
+    let face_w = faces.map_or(0, |w| w as usize + 1);
+    let left = 2 + face_w;
+    if width < 16 + face_w {
+        return (out, decos, starts, bigs, link_cells, audios, pics, senders, spots);
     }
-    let outer = (width * 3 / 4).clamp(16, 90).min(width - 4);
+    let outer = (width * 3 / 4).clamp(16, 90).min(width - 4 - face_w);
     // A cell of air on the left, two on the right, where the text would
     // otherwise run into the edge.
     let inner = outer - 3;
@@ -1303,15 +1455,24 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, cell: Option<(u32, u32
         }
         let first = prev_sender != Some(m.sender.as_str());
         out.push(Line::default());
-        let name_color = NAMES[m.sender.bytes().fold(0usize, |h, b| h.wrapping_mul(31).wrapping_add(b as usize)) % NAMES.len()];
+        let who_color = name_color(&m.sender);
+        if faces.is_some() && !m.from_me && first {
+            senders.push((out.len(), 1, m.sender.clone()));
+        }
 
-        // Only emojis: big, the time in a pill under their right end.
-        let big = cell.filter(|_| m.quote.is_empty()).and_then(|c| crate::bigemoji::cells(&m.text, c));
-        if let Some((ew, eh)) = big.filter(|&(ew, _)| ew as usize + 4 <= width) {
+        // Only emojis: big, the time in a pill under their right end. A
+        // sticker goes the same way, its picture without a bubble.
+        let big = cell.filter(|_| m.quote.is_empty()).and_then(|c| crate::bigemoji::cells(&m.text, c)).map(|(w, h)| (w as usize, h, None));
+        let sticker = cell.and_then(|(cw, ch)| {
+            let md = m.media.as_ref().filter(|md| md.kind == "sticker")?;
+            let cols = (STICKER_ROWS as f64 * ch as f64 / cw.max(1) as f64).round() as usize;
+            Some((cols, STICKER_ROWS, Some(md)))
+        });
+        if let Some((ew, eh, sticker)) = sticker.or(big).filter(|&(ew, ..)| ew + 4 + face_w <= width) {
             starts.push((m.id.clone(), out.len()));
             if group && !m.from_me && first {
-                let name = Style::new().fg(name_color).add_modifier(Modifier::BOLD);
-                out.push(Line::from(vec![Span::raw("  "), Span::styled(truncate(&m.sender_name, inner), name)]));
+                let name = Style::new().fg(who_color).add_modifier(Modifier::BOLD);
+                out.push(Line::from(vec![Span::raw(" ".repeat(left)), Span::styled(truncate(&m.sender_name, inner), name)]));
             }
             let mut stamp = vec![Span::styled(format!(" {}", t.format("%H:%M")), Style::new().fg(META_IN).bg(DAY_PILL))];
             // Big emojis only come with pictures: the ticks are one, over blanks.
@@ -1321,9 +1482,11 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, cell: Option<(u32, u32
             }
             stamp.push(Span::styled(" ", Style::new().bg(DAY_PILL)));
             let pw = row_width(&stamp) + 2;
-            let ew = ew as usize;
-            let (ex, px) = if m.from_me { (width - 2 - ew, width.saturating_sub(2 + pw)) } else { (2, 2 + ew.saturating_sub(pw)) };
-            bigs.push((out.len(), ex, (ew as u16, eh), m.text.clone()));
+            let (ex, px) = if m.from_me { (width - 2 - ew, width.saturating_sub(2 + pw)) } else { (left, left + ew.saturating_sub(pw)) };
+            match sticker {
+                Some(md) => pics.push(crate::media::PicSpot::new(m, md, out.len(), ex, (ew, eh as usize))),
+                None => bigs.push((out.len(), ex, (ew as u16, eh), m.text.clone())),
+            }
             out.extend((0..eh).map(|_| Line::default()));
             if m.from_me {
                 decos.push((out.len(), px + 1 + tick_col, Deco::Ticks(m.status, ticks(m.status).1)));
@@ -1332,23 +1495,44 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, cell: Option<(u32, u32
             spans.extend(stamp);
             spans.push(Span::styled(CAP_R, Style::new().fg(DAY_PILL)));
             out.push(Line::from(spans));
+            let (sx, sw) = (ex.min(px), (ex + ew).max(px + pw) - ex.min(px));
+            let top = out.len() - 1 - eh as usize;
+            spots.push(Spot { id: m.id.clone(), top, rows: eh as usize + 1, x: sx, w: sw, from_me: m.from_me, quote: None });
+            out.extend(reactions_line(m, sx, sw, width));
             prev_sender = Some(m.sender.as_str());
             continue;
         }
 
-        let (bg, meta_fg) = if m.from_me { (BUBBLE_OUT, META_OUT) } else { (BUBBLE_IN, META_IN) };
+        let (bg, meta_fg) = if m.from_me { (bubble_out(), meta_out()) } else { (BUBBLE_IN, META_IN) };
         let body = Style::new().fg(TEXT).bg(bg);
         let meta = Style::new().fg(meta_fg).bg(bg);
 
         // The bubble's content, row by row.
         let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
         if group && !m.from_me && first {
-            rows.push(vec![Span::styled(truncate(&m.sender_name, inner), Style::new().fg(name_color).bg(bg).add_modifier(Modifier::BOLD))]);
+            rows.push(vec![Span::styled(truncate(&m.sender_name, inner), Style::new().fg(who_color).bg(bg).add_modifier(Modifier::BOLD))]);
         }
+        // A quote in a box of its own, as WhatsApp Web's: a bar in its
+        // author's color, their name, then up to two lines of it.
+        let quote_bg = if m.from_me { code_out() } else { DAY_PILL };
+        let mut quote_rows = 0..0;
         if !m.quote.is_empty() {
-            let mut q = vec![Span::styled("▎", Style::new().fg(GREEN).bg(bg))];
-            q.extend(crate::markup::line(&m.quote, inner.saturating_sub(2), meta.add_modifier(Modifier::ITALIC)));
-            rows.push(q);
+            let bar_color = if m.quote_from.is_empty() { green() } else { name_color(&m.quote_from) };
+            let bar = Span::styled("▎ ", Style::new().fg(bar_color).bg(quote_bg));
+            let qw = inner.saturating_sub(3);
+            let start = rows.len();
+            if !m.quote_name.is_empty() {
+                let who = Style::new().fg(bar_color).bg(quote_bg).add_modifier(Modifier::BOLD);
+                rows.push(vec![bar.clone(), Span::styled(truncate(&m.quote_name, qw), who)]);
+            }
+            let mut text = wrap(&m.quote, qw);
+            if text.len() > 2 {
+                text[1] = truncate(&format!("{}…", text[1].trim_end()), qw);
+            }
+            for l in text.into_iter().take(2) {
+                rows.push(vec![bar.clone(), Span::styled(l, Style::new().fg(meta_fg).bg(quote_bg))]);
+            }
+            quote_rows = start..rows.len();
         }
         // A photo or video across the bubble, blank rows its picture goes
         // over; the text under it wraps to its width, as WhatsApp does.
@@ -1364,7 +1548,7 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, cell: Option<(u32, u32
         }
         let text = if media.is_some() { crate::media::caption(m) } else { m.text.as_str() };
         // Links underlined in their color, on every row they wrap onto.
-        let link = Style::new().fg(if m.from_me { LINK_OUT } else { LINK_IN }).bg(bg).add_modifier(Modifier::UNDERLINED);
+        let link = Style::new().fg(if m.from_me { link_out() } else { LINK_IN }).bg(bg).add_modifier(Modifier::UNDERLINED);
         let mut pieces = Vec::new();
         // An audio is a player, not its text.
         let audio = audio_of(m);
@@ -1382,7 +1566,7 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, cell: Option<(u32, u32
             2
         } else {
             // WhatsApp's formatting, its markers hidden: the rows' widths are what's shown.
-            let looks = crate::markup::Looks { base: body, link, shade: if m.from_me { CODE_OUT } else { CODE_IN }, dim: meta_fg };
+            let looks = crate::markup::Looks { base: body, link, shade: if m.from_me { code_out() } else { CODE_IN }, dim: meta_fg };
             let (text, found) = crate::markup::rows(text, wrap, &looks);
             pieces.extend(found.into_iter().map(|(r, c, w, url)| (rows.len() + r, c, w, url)));
             let n_text = text.len();
@@ -1425,7 +1609,7 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, cell: Option<(u32, u32
             .unwrap_or(0);
         let bw = content_w + 3;
         // A column kept free on the tail's side.
-        let x = if m.from_me { width.saturating_sub(bw + 2) } else { 2 };
+        let x = if m.from_me { width.saturating_sub(bw + 2) } else { left };
         if !inline {
             let mut r = vec![Span::styled(" ".repeat(content_w - footer_w), body)];
             r.extend(footer.clone());
@@ -1436,8 +1620,8 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, cell: Option<(u32, u32
         if audio.is_some() {
             rows.push(Vec::new());
         }
-        let rule = Style::new().fg(if m.from_me { RULE_OUT } else { RULE_IN }).bg(bg);
-        let button = Style::new().fg(GREEN).bg(bg);
+        let rule = Style::new().fg(if m.from_me { rule_out() } else { RULE_IN }).bg(bg);
+        let button = Style::new().fg(green()).bg(bg);
         for (label, url) in &buttons {
             rows.push(vec![Span::styled("─".repeat(content_w), rule)]);
             let left = (content_w - label.width()) / 2;
@@ -1464,6 +1648,14 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, cell: Option<(u32, u32
             if i == footer_row && inline {
                 r.push(Span::styled(" ".repeat(content_w - used - footer_w), body));
                 r.extend(footer.clone());
+            } else if quote_rows.contains(&i) {
+                // Across the bubble; a rounded corner's cell bare under its picture.
+                let corner = rounded && (i == quote_rows.start || i + 1 == quote_rows.end);
+                let fill = Style::new().bg(quote_bg);
+                r.push(Span::styled(" ".repeat((content_w - used).saturating_sub(usize::from(corner))), fill));
+                if corner {
+                    r.push(Span::styled(" ", body));
+                }
             } else {
                 r.push(Span::styled(" ".repeat(content_w - used), body));
             }
@@ -1480,6 +1672,10 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, cell: Option<(u32, u32
                 _ => 0,
             };
             decos.extend(box_corners(top, n, x, bw, bg, square));
+            if !quote_rows.is_empty() {
+                // The bar's side stays square.
+                decos.extend(box_corners(top + quote_rows.start, quote_rows.len(), x + 1, content_w, quote_bg, TL | BL));
+            }
             if m.from_me {
                 decos.push((top + footer_row, x + 1 + content_w - crate::ticks::CELLS as usize, Deco::Ticks(m.status, tick_color)));
             }
@@ -1514,9 +1710,35 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, cell: Option<(u32, u32
                 secs: a.secs,
             });
         }
+        let quote = (!quote_rows.is_empty()).then(|| (top + quote_rows.start, quote_rows.len()));
+        spots.push(Spot { id: m.id.clone(), top, rows: n, x, w: bw, from_me: m.from_me, quote });
+        out.extend(reactions_line(m, x, bw, width));
         prev_sender = Some(m.sender.as_str());
     }
-    (out, decos, starts, bigs, link_cells, audios, pics)
+    (out, decos, starts, bigs, link_cells, audios, pics, senders, spots)
+}
+
+/// The reactions under a bubble, as WhatsApp Web's: a pill with up to three
+/// emojis, the most used first, and how many reacted when more than one;
+/// at the bubble's left for others', its right for yours.
+fn reactions_line(m: &Msg, x: usize, w: usize, width: usize) -> Option<Line<'static>> {
+    if m.reactions.is_empty() {
+        return None;
+    }
+    let total: u32 = m.reactions.iter().map(|r| r.count).sum();
+    let mut label = String::from(" ");
+    for r in m.reactions.iter().take(3) {
+        label.push_str(&r.emoji);
+    }
+    if total > 1 {
+        label.push_str(&format!(" {total}"));
+    }
+    label.push(' ');
+    let pw = label.width() + 2;
+    let col = if m.from_me { (x + w).saturating_sub(pw + 1) } else { x + 1 };
+    let mut spans = vec![Span::raw(" ".repeat(col.min(width.saturating_sub(pw))))];
+    spans.extend(pill(label, TEXT, FIELD));
+    Some(Line::from(spans))
 }
 
 /// What's drawn over the panel's text: the big picture, or a member's.
@@ -1609,7 +1831,7 @@ fn profile_panel(f: &mut Frame, app: &mut App, area: Rect, beside: bool) {
             // Open or not, as WhatsApp Web puts it: "Aberta até às 17:00".
             let open = (!d.hours.is_empty()).then(|| opening(&d.hours, d.tz));
             if let Some(o) = &open {
-                let (word, color) = if o.open { ("Aberta", GREEN) } else { ("Fechada", CLOSED) };
+                let (word, color) = if o.open { ("Aberta", green()) } else { ("Fechada", CLOSED) };
                 let mut spans = vec![Span::styled(word, Style::new().fg(color))];
                 if !o.next.is_empty() {
                     spans.push(Span::styled(format!(" {}", o.next), meta));
@@ -1642,9 +1864,9 @@ fn profile_panel(f: &mut Frame, app: &mut App, area: Rect, beside: bool) {
                         lines.push(Line::default());
                     }
                 };
-                let green = |lines: &mut Vec<Line<'static>>, t: &str| {
+                let in_green = |lines: &mut Vec<Line<'static>>, t: &str| {
                     for l in wrap(t, text_w) {
-                        lines.push(Line::from(Span::styled(format!("  {l}"), Style::new().fg(GREEN))));
+                        lines.push(Line::from(Span::styled(format!("  {l}"), Style::new().fg(green()))));
                     }
                 };
                 if !d.description.trim().is_empty() {
@@ -1655,8 +1877,8 @@ fn profile_panel(f: &mut Frame, app: &mut App, area: Rect, beside: bool) {
                     gap(&mut lines);
                     week_row = Some(lines.len());
                     let (now, color) = match (o.always, o.open) {
-                        (true, _) => ("Aberta 24 horas", GREEN),
-                        (_, true) => ("Aberta agora", GREEN),
+                        (true, _) => ("Aberta 24 horas", green()),
+                        (_, true) => ("Aberta agora", green()),
                         _ => ("Fechada agora", CLOSED),
                     };
                     let today = if o.always { String::new() } else { day_hours(&d.hours, o.day) };
@@ -1688,17 +1910,17 @@ fn profile_panel(f: &mut Frame, app: &mut App, area: Rect, beside: bool) {
                         lines.push(Line::from(Span::styled(format!("  {l}"), text)));
                     }
                     if !d.maps.is_empty() {
-                        lines.push(Line::from(Span::styled(format!("  {PIN} Abrir no Google Maps"), Style::new().fg(GREEN))));
+                        lines.push(Line::from(Span::styled(format!("  {PIN} Abrir no Google Maps"), Style::new().fg(green()))));
                         maps_rows = Some((from, lines.len()));
                     }
                 }
                 if !d.email.is_empty() {
                     gap(&mut lines);
-                    green(&mut lines, &d.email);
+                    in_green(&mut lines, &d.email);
                 }
                 for site in &d.website {
                     gap(&mut lines);
-                    green(&mut lines, site);
+                    in_green(&mut lines, site);
                 }
                 if lines.len() == before {
                     lines.push(Line::from(Span::styled("  Esta é uma conta comercial.", meta)));
@@ -1728,7 +1950,7 @@ fn profile_panel(f: &mut Frame, app: &mut App, area: Rect, beside: bool) {
                     let gap = room.saturating_sub(name.width() + tag_w);
                     let mut top = vec![Span::raw(lead.clone()), Span::styled(name, text), Span::raw(" ".repeat(gap))];
                     if m.admin {
-                        top.extend(pill(tag.into(), CHIP_ON_TEXT, CHIP_ON));
+                        top.extend(pill(tag.into(), chip_on_text(), chip_on()));
                     }
                     lines.push(Line::from(top));
                     lines.push(Line::from(vec![Span::raw(lead.clone()), Span::styled(truncate(&sub, room), meta)]));
@@ -1874,7 +2096,7 @@ fn opening(hours: &[Hours], tz: Option<i32>) -> Opening {
 /// Text wrapped to `width` after `lead`, with WhatsApp's formatting, its
 /// links and e-mails in green.
 fn paragraph(lines: &mut Vec<Line<'static>>, text: &str, width: usize, lead: &str) {
-    let looks = crate::markup::Looks { base: Style::new().fg(TEXT), link: Style::new().fg(GREEN), shade: CODE_IN, dim: META_IN };
+    let looks = crate::markup::Looks { base: Style::new().fg(TEXT), link: Style::new().fg(green()), shade: CODE_IN, dim: META_IN };
     for row in crate::markup::rows(text, width, &looks).0 {
         let mut spans = vec![Span::raw(lead.to_string())];
         spans.extend(row);

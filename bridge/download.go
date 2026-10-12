@@ -99,6 +99,11 @@ func (md *Media) picture(chat, id string, part *waE2E.Message) {
 			md.Thumb = path + ".frame.jpg"
 			return
 		}
+	case part.GetStickerMessage() != nil:
+		// Its file is small: fetched as it shows, no thumbnail needed.
+		x := part.GetStickerMessage()
+		md.Width, md.Height = x.GetWidth(), x.GetHeight()
+		return
 	default:
 		return
 	}

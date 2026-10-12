@@ -20,7 +20,8 @@ use unicode_width::UnicodeWidthStr;
 const BACKDROP: Color = Color::Rgb(0x0B, 0x0E, 0x0F);
 /// A key's chip, as in "Atalhos de teclado".
 const KEY: Color = Color::Rgb(0x3B, 0x3E, 0x3E);
-/// The most a picture is blown up past its own pixels.
+/// The most a video is blown up past its own pixels; photos and stickers
+/// show at most at their real size.
 const MOST_ZOOM: u32 = 2;
 /// Caption rows at most.
 const CAPTION_ROWS: usize = 3;
@@ -46,9 +47,12 @@ pub struct View {
     // Where things were on the last draw, for mpv and the mouse.
     media: Rect,
     bar: Rect,
-    open_btn: Rect,
-    close_btn: Rect,
+    /// The top bar's hints, as `HINTS` has them.
+    btns: [Rect; 4],
 }
+
+/// The top bar's keys, as slick's viewer has them.
+const HINTS: [(&str, &str); 4] = [("b", "baixar"), ("p", "mostrar na pasta"), ("o", "abrir fora"), ("Esc", "fecha")];
 
 impl App {
     /// Opens the message's photo or video big; a video plays at once,
@@ -64,7 +68,7 @@ impl App {
             self.cmd(json!({"c": "download", "chat": chat, "id": id}));
         }
         let none = Rect::default();
-        self.viewer = Some(View { chat: chat.into(), id: id.into(), video, gif, state, media: none, bar: none, open_btn: none, close_btn: none });
+        self.viewer = Some(View { chat: chat.into(), id: id.into(), video, gif, state, media: none, bar: none, btns: [none; 4] });
     }
 
     pub(crate) fn close_viewer(&mut self) {
@@ -121,6 +125,57 @@ impl App {
         }
     }
 
+    /// `b`, or with `reveal` (`p`) also shown in the file manager: the
+    /// viewer's media saved to the downloads folder, once it's here.
+    fn viewer_save(&mut self, reveal: bool) {
+        let Some(v) = self.viewer.as_ref() else { return };
+        let (chat, id) = (v.chat.clone(), v.id.clone());
+        if self.media_file(&chat, &id).is_some() {
+            return self.save_media(&chat, &id, reveal);
+        }
+        if self.save_when_ready.is_none() && v.state != State::Loading {
+            self.cmd(json!({"c": "download", "chat": chat, "id": id}));
+        }
+        self.save_when_ready = Some((chat, id, reveal));
+        self.note("Baixando…");
+    }
+
+    /// Copies the message's file to the downloads folder, named as WhatsApp
+    /// Web names it, never over another; once per message. `reveal` opens
+    /// the folder.
+    pub(crate) fn save_media(&mut self, chat: &str, id: &str, reveal: bool) {
+        let key = (chat.to_string(), id.to_string());
+        let path = match self.saved.get(&key).filter(|p| p.exists()) {
+            Some(p) => p.clone(),
+            None => {
+                let Some(file) = self.media_file(chat, id) else { return };
+                let Some(m) = self.msgs.get(chat).and_then(|l| l.iter().find(|m| m.id == id)) else { return };
+                let kind = match m.media.as_ref().map(|md| md.kind.as_str()) {
+                    Some("video") => "Video",
+                    Some("sticker") => "Sticker",
+                    Some("audio") => "Audio",
+                    Some("document") => "Document",
+                    _ => "Image",
+                };
+                let ext = std::path::Path::new(&file).extension().and_then(|e| e.to_str()).unwrap_or("bin").to_string();
+                let name = format!("WhatsApp {kind} {}", local(m.ts).format("%Y-%m-%d at %H.%M.%S"));
+                match save_copy(&file, &name, &ext) {
+                    Ok(p) => {
+                        self.saved.insert(key, p.clone());
+                        p
+                    }
+                    Err(e) => return self.note(format!("não salvou: {e}")),
+                }
+            }
+        };
+        if reveal {
+            if let Some(dir) = path.parent() {
+                crate::links::open(&dir.to_string_lossy());
+            }
+        }
+        self.note(format!("Salvo em {}", pretty(&path)));
+    }
+
     /// Right after a draw that left the video's cells blank: mpv takes them.
     pub fn after_draw(&mut self) {
         let Some(v) = self.viewer.as_ref().filter(|v| v.state == State::Starting) else { return };
@@ -173,6 +228,8 @@ impl App {
             KeyCode::Esc | KeyCode::Char('q') => self.close_viewer(),
             KeyCode::Char(' ' | 'v') | KeyCode::Enter => self.viewer_play(),
             KeyCode::Char('o') => self.viewer_outside(),
+            KeyCode::Char('b' | 'd') => self.viewer_save(false),
+            KeyCode::Char('p') => self.viewer_save(true),
             _ => {}
         }
         true
@@ -189,10 +246,14 @@ impl App {
             return true;
         }
         let at = Position::new(m.column, m.row);
-        if v.close_btn.contains(at) {
-            self.close_viewer();
-        } else if v.open_btn.contains(at) {
-            self.viewer_outside();
+        let hit = v.btns.iter().position(|r| r.contains(at));
+        if let Some(i) = hit {
+            match i {
+                0 => self.viewer_save(false),
+                1 => self.viewer_save(true),
+                2 => self.viewer_outside(),
+                _ => self.close_viewer(),
+            }
         } else if v.media.contains(at) {
             self.viewer_play();
         } else if !v.bar.contains(at) {
@@ -219,10 +280,10 @@ pub fn draw(f: &mut Frame, app: &mut App) -> bool {
 
     // The top bar: who sent it and when on the left, the keys on the right.
     let bar = Rect { height: 2.min(area.height), ..area };
-    let hints = [("o", "abrir fora"), ("Esc", "fecha")];
+    let hints = HINTS;
     let hint_w = |(k, l): (&str, &str)| (k.width() + 3 + l.width()) as u16;
     let mut x = area.right().saturating_sub(2 + hints.iter().map(|&h| hint_w(h) + 3).sum::<u16>() - 3);
-    let mut btns = [Rect::default(); 2];
+    let mut btns = [Rect::default(); 4];
     for (n, &(k, l)) in hints.iter().enumerate() {
         let w = hint_w((k, l));
         let r = Rect::new(x, bar.y, w, 1).intersection(area);
@@ -282,6 +343,8 @@ pub fn draw(f: &mut Frame, app: &mut App) -> bool {
         }
     }
     let status = match app.notice.as_ref() {
+        // Red for what went wrong; a save is good news.
+        Some((n, _)) if n.starts_with("Salvo") || n.starts_with("Baixando") => Span::styled(n.clone(), Style::new().fg(crate::ui::green())),
         Some((n, _)) => Span::styled(n.clone(), Style::new().fg(Color::Red)),
         None => Span::styled(
             match state {
@@ -320,7 +383,8 @@ pub fn draw(f: &mut Frame, app: &mut App) -> bool {
         _ => 4.0 / 3.0,
     };
     let media = if box_w >= 8 && box_h >= 3 {
-        let most = size.map_or(box_w, |(w, _)| ((w * MOST_ZOOM).div_ceil(cell.0) as u16).clamp(1, box_w));
+        let zoom = if video { MOST_ZOOM } else { 1 };
+        let most = size.map_or(box_w, |(w, _)| ((w * zoom).div_ceil(cell.0) as u16).clamp(1, box_w));
         let (cols, rows) = fit(shape, cell, most, box_h);
         Rect::new(area.x + (area.width - cols) / 2, top + (box_h - rows) / 2, cols, rows)
     } else {
@@ -367,9 +431,56 @@ pub fn draw(f: &mut Frame, app: &mut App) -> bool {
     f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), r);
 
     if let Some(v) = app.viewer.as_mut() {
-        (v.media, v.bar, v.open_btn, v.close_btn) = (media, bar, btns[0], btns[1]);
+        (v.media, v.bar, v.btns) = (media, bar, btns);
     }
     true
+}
+
+/// `$XDG_DOWNLOAD_DIR`, as `xdg-user-dirs` records it, else `~/Downloads`,
+/// as slick finds it.
+fn downloads_dir() -> std::path::PathBuf {
+    use std::path::{Path, PathBuf};
+    let home = std::env::var("HOME").unwrap_or_default();
+    let config = std::env::var("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|_| Path::new(&home).join(".config"));
+    let from_file = std::fs::read_to_string(config.join("user-dirs.dirs")).ok().and_then(|text| {
+        text.lines().find_map(|l| {
+            let v = l.trim().strip_prefix("XDG_DOWNLOAD_DIR=")?.trim_matches('"');
+            Some(v.replace("$HOME", &home))
+        })
+    });
+    std::env::var("XDG_DOWNLOAD_DIR")
+        .ok()
+        .or(from_file)
+        .filter(|d| !d.is_empty() && d.trim_end_matches('/') != home.trim_end_matches('/'))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(&home).join("Downloads"))
+}
+
+/// `name.ext` in the downloads folder, else `name (1).ext`…: never over
+/// another file. A hard link when it's the same disk, a copy when not.
+fn save_copy(from: &str, name: &str, ext: &str) -> std::io::Result<std::path::PathBuf> {
+    let dir = downloads_dir();
+    std::fs::create_dir_all(&dir)?;
+    for n in 0.. {
+        let path = dir.join(if n == 0 { format!("{name}.{ext}") } else { format!("{name} ({n}).{ext}") });
+        if path.exists() {
+            continue;
+        }
+        if std::fs::hard_link(from, &path).is_err() {
+            std::fs::copy(from, &path)?;
+        }
+        return Ok(path);
+    }
+    unreachable!()
+}
+
+/// `~/Downloads/a.jpg`, for the note.
+fn pretty(p: &std::path::Path) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    match p.strip_prefix(&home) {
+        Ok(rest) if !home.is_empty() => format!("~/{}", rest.display()),
+        _ => p.display().to_string(),
+    }
 }
 
 /// As big as fits in `most_cols`×`most_rows` cells, kept to its shape.

@@ -51,6 +51,8 @@ impl App {
     /// Opening another chat: the box's text stays with the one left, and
     /// the new one's comes back.
     pub fn switch_draft(&mut self, to: &str) {
+        // An edit isn't a draft: what was typed before it is.
+        self.cancel_edit();
         let text = std::mem::take(&mut self.input);
         if let Some(from) = self.open.clone() {
             if text.trim().is_empty() {

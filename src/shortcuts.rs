@@ -4,7 +4,7 @@
 
 use crate::app::App;
 use crate::config::ENTER_SENDS;
-use crate::ui::{dim, truncate, CAP_L, CAP_R, GREEN, TEXT};
+use crate::ui::{dim, truncate, CAP_L, CAP_R, green, TEXT};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -54,6 +54,8 @@ fn sections(app: &App) -> Vec<Section> {
             "Fotos e vídeos",
             vec![
                 ("Espaço / Enter", "Tocar ou parar o vídeo"),
+                ("b", "Baixar para a pasta Downloads"),
+                ("p", "Baixar e mostrar na pasta"),
                 ("o", "Abrir fora do app"),
                 ("Esc / q", "Fechar"),
             ],
@@ -69,6 +71,7 @@ fn sections(app: &App) -> Vec<Section> {
                 ("Ctrl+V", "Colar imagem ou arquivos"),
                 ("Ctrl+W", "Apagar a palavra anterior"),
                 ("Ctrl+U", "Apagar a mensagem"),
+                ("↑", "Editar a última mensagem enviada"),
                 ("Esc / Tab", "Voltar para a lista"),
             ],
         ),
@@ -147,7 +150,7 @@ impl Column {
             if n > 0 {
                 rows.push(Line::default());
             }
-            rows.push(Line::from(format!(" {heading}")).style(Style::new().fg(GREEN).bold()));
+            rows.push(Line::from(format!(" {heading}")).style(Style::new().fg(green()).bold()));
             for (k, d) in keys_of {
                 let mut spans = vec![Span::raw("  ")];
                 let c = chips(k);

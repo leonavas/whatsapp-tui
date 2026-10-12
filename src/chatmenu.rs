@@ -424,14 +424,14 @@ fn draw_sub(f: &mut Frame, app: &mut App, main: Rect, row_y: u16, sel: usize) {
     boxed(f, app, area, lines);
 }
 
-fn separator(w: u16) -> Line<'static> {
+pub(crate) fn separator(w: u16) -> Line<'static> {
     let bg = Style::new().bg(MENU_BG);
     Line::from(vec![Span::styled("  ", bg), Span::styled("─".repeat((w as usize).saturating_sub(4)), bg.fg(Color::DarkGray)), Span::styled("  ", bg)])
 }
 
 /// `lines` in a box of the menu color, a blank row over and under them, its
 /// corners rounded where the terminal shows pictures.
-fn boxed(f: &mut Frame, app: &mut App, area: Rect, lines: Vec<Line<'static>>) {
+pub(crate) fn boxed(f: &mut Frame, app: &mut App, area: Rect, lines: Vec<Line<'static>>) {
     let w = area.width as usize;
     let rounded = app.picker.is_some();
     let bg = Style::new().bg(MENU_BG);

@@ -47,6 +47,13 @@ type Msg struct {
 	TS         int64  `json:"ts"`
 	Text       string `json:"text"`
 	Quote      string `json:"quote,omitempty"`
+	// Who wrote the quoted message, and the name it shows under ("Você" for us).
+	QuoteFrom string `json:"quote_from,omitempty"`
+	// The quoted message's id: a click on the quote goes to it.
+	QuoteID string `json:"quote_id,omitempty"`
+	QuoteName string `json:"quote_name,omitempty"`
+	// The emojis under it, the most used first.
+	Reactions []Reaction `json:"reactions,omitempty"`
 	// A photo, video, audio, document or sticker; nil for the rest.
 	Media *Media `json:"media,omitempty"`
 	// A business's title, footer and buttons around the text.
@@ -104,6 +111,9 @@ type Cmd struct {
 	// (for Secs, 0 is forever), unmute, favorite, unfavorite, clear, delete.
 	Action string `json:"action"`
 	Secs   int64  `json:"secs"`
+	// delete_msgs: the messages, and whether for everyone or for you only.
+	IDs      []string `json:"ids"`
+	Everyone bool     `json:"everyone"`
 }
 
 var (
@@ -195,6 +205,9 @@ CREATE TABLE IF NOT EXISTS messages (
 	ts INTEGER NOT NULL,
 	text TEXT NOT NULL,
 	quote TEXT NOT NULL DEFAULT '',
+	-- Who wrote the quoted message.
+	quote_from TEXT NOT NULL DEFAULT '',
+	quote_id TEXT NOT NULL DEFAULT '',
 	status INTEGER NOT NULL DEFAULT 0,
 	-- The sender as WhatsApp has it (maybe a LID), for message keys.
 	wa_sender TEXT NOT NULL DEFAULT '',
@@ -216,6 +229,15 @@ CREATE TABLE IF NOT EXISTS media (
 	wa_chat TEXT NOT NULL DEFAULT '',
 	wa_sender TEXT NOT NULL DEFAULT '',
 	PRIMARY KEY (chat, id)
+);
+-- One reaction per message and sender, as WhatsApp allows.
+CREATE TABLE IF NOT EXISTS reactions (
+	chat TEXT NOT NULL,
+	id TEXT NOT NULL,
+	sender TEXT NOT NULL,
+	emoji TEXT NOT NULL,
+	ts INTEGER NOT NULL,
+	PRIMARY KEY (chat, id, sender)
 );
 CREATE TABLE IF NOT EXISTS meta (
 	k TEXT PRIMARY KEY,
@@ -266,6 +288,8 @@ func main() {
 		`messages ADD COLUMN wa_sender TEXT NOT NULL DEFAULT ''`,
 		`messages ADD COLUMN card TEXT NOT NULL DEFAULT ''`,
 		`chats ADD COLUMN verified TEXT NOT NULL DEFAULT ''`,
+		`messages ADD COLUMN quote_from TEXT NOT NULL DEFAULT ''`,
+		`messages ADD COLUMN quote_id TEXT NOT NULL DEFAULT ''`,
 	} {
 		db.Exec(`ALTER TABLE ` + col)
 	}
@@ -354,6 +378,12 @@ func (b *Bridge) commands() {
 			go b.unread(c.Chat, c.Limit)
 		case "send":
 			go b.send(c.Chat, c.Text)
+		case "react":
+			go b.sendReaction(c.Chat, c.ID, c.Text)
+		case "edit":
+			go b.edit(c.Chat, c.ID, c.Text)
+		case "delete_msgs":
+			go b.deleteMsgs(c.Chat, c.IDs, c.Everyone)
 		case "send_file":
 			b.sendFile(c)
 		case "read":
@@ -434,6 +464,11 @@ func (b *Bridge) handle(raw any) {
 		case b.avatars <- avatarReq{jid: b.norm(e.JID).String(), force: true}:
 		default:
 		}
+	case *events.PushNameSetting:
+		// Your name, changed on the phone (or first had from it).
+		if n := e.Action.GetName(); n != "" {
+			emit(map[string]any{"t": "ready", "me": b.cli.Store.ID.User, "name": n})
+		}
 	case *events.PushName, *events.Contact:
 		b.dirty.Store(true)
 	default:
@@ -464,7 +499,7 @@ func (b *Bridge) me() types.JID {
 // downloads. For a logout, from here or from the phone, and for a start
 // without a session, so a new one never shows the last one's chats.
 func (b *Bridge) wipe() {
-	for _, t := range []string{"chats", "messages", "media", "meta"} {
+	for _, t := range []string{"chats", "messages", "media", "reactions", "meta"} {
 		b.db.Exec("DELETE FROM " + t)
 	}
 	b.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -519,6 +554,20 @@ func (b *Bridge) senderName(j types.JID, push string) string {
 	return j.User
 }
 
+// quoteName is how a quote names its author: as their messages do, with
+// the push name one of them came with when they're no contact.
+func (b *Bridge) quoteName(from string) string {
+	j, err := types.ParseJID(from)
+	if err != nil || j.IsEmpty() {
+		return ""
+	}
+	var push string
+	if j.User != b.me().User && b.contactName(j) == "" {
+		b.db.QueryRow(`SELECT push_name FROM messages WHERE sender = ? AND push_name != '' ORDER BY ts DESC LIMIT 1`, from).Scan(&push)
+	}
+	return b.senderName(j, push)
+}
+
 func skip(chat types.JID) bool {
 	return chat.Server == types.BroadcastServer || chat.Server == types.NewsletterServer || chat.IsEmpty()
 }
@@ -530,18 +579,35 @@ func (b *Bridge) message(e *events.Message, status int) *Msg {
 	if skip(chat) {
 		return nil
 	}
+	// A reaction changes the message it's on.
+	if rm := e.Message.GetReactionMessage(); rm != nil {
+		id := rm.GetKey().GetID()
+		sender := b.norm(e.Info.Sender).String()
+		if e.Info.IsFromMe {
+			sender = b.me().String()
+		}
+		ts := rm.GetSenderTimestampMS() / 1000
+		if ts == 0 {
+			ts = e.Info.Timestamp.Unix()
+		}
+		b.react(chat.String(), id, sender, rm.GetText(), ts)
+		return b.load(chat.String(), id)
+	}
 	if pm := e.Message.GetProtocolMessage(); pm != nil {
 		var text string
 		switch pm.GetType() {
 		case waE2E.ProtocolMessage_REVOKE:
-			text = "🚫 Mensagem apagada"
+			text = revokedOthers
+			if e.Info.IsFromMe {
+				text = revokedMine
+			}
 			b.db.Exec(`DELETE FROM media WHERE chat = ? AND id = ?`, chat.String(), pm.GetKey().GetID())
 		case waE2E.ProtocolMessage_MESSAGE_EDIT:
 			t, ok := textOf(pm.GetEditedMessage())
 			if !ok {
 				return nil
 			}
-			text = t + " (editada)"
+			text = t + editedMark
 		default:
 			return nil
 		}
@@ -559,13 +625,17 @@ func (b *Bridge) message(e *events.Message, status int) *Msg {
 	if e.Info.IsFromMe {
 		sender = b.me()
 	}
-	quote := ""
-	if q := contextOf(e.Message).GetQuotedMessage(); q != nil {
-		quote, _ = textOf(q)
+	quote, quoteFrom, quoteID := "", "", ""
+	if ci := contextOf(e.Message); ci.GetQuotedMessage() != nil {
+		quote, _ = textOf(ci.GetQuotedMessage())
+		quoteID = ci.GetStanzaID()
+		if j, err := types.ParseJID(ci.GetParticipant()); err == nil && !j.IsEmpty() {
+			quoteFrom = b.norm(j).String()
+		}
 	}
 	m := &Msg{
 		Chat: chat.String(), ID: e.Info.ID, Sender: sender.String(), FromMe: e.Info.IsFromMe,
-		TS: e.Info.Timestamp.Unix(), Text: text, Quote: quote, Status: status,
+		TS: e.Info.Timestamp.Unix(), Text: text, Quote: quote, QuoteFrom: quoteFrom, QuoteID: quoteID, Status: status,
 	}
 	lo := cardOf(e.Message)
 	card := cardJSON(lo)
@@ -574,10 +644,12 @@ func (b *Bridge) message(e *events.Message, status int) *Msg {
 	}
 	var had int
 	m.fresh = b.db.QueryRow(`SELECT 1 FROM messages WHERE chat = ? AND id = ?`, m.Chat, m.ID).Scan(&had) != nil
-	_, err := b.db.Exec(`INSERT INTO messages (chat, id, sender, push_name, from_me, ts, text, quote, status, wa_sender, card)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT (chat, id) DO UPDATE SET text = excluded.text, status = max(status, excluded.status), card = excluded.card`,
-		m.Chat, m.ID, m.Sender, e.Info.PushName, m.FromMe, m.TS, m.Text, m.Quote, m.Status, e.Info.Sender.ToNonAD().String(), card)
+	_, err := b.db.Exec(`INSERT INTO messages (chat, id, sender, push_name, from_me, ts, text, quote, quote_from, quote_id, status, wa_sender, card)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (chat, id) DO UPDATE SET text = excluded.text, status = max(status, excluded.status), card = excluded.card,
+			quote_from = CASE WHEN quote_from = '' THEN excluded.quote_from ELSE quote_from END,
+			quote_id = CASE WHEN quote_id = '' THEN excluded.quote_id ELSE quote_id END`,
+		m.Chat, m.ID, m.Sender, e.Info.PushName, m.FromMe, m.TS, m.Text, m.Quote, m.QuoteFrom, m.QuoteID, m.Status, e.Info.Sender.ToNonAD().String(), card)
 	if err != nil {
 		return nil
 	}
@@ -594,6 +666,7 @@ func (b *Bridge) message(e *events.Message, status int) *Msg {
 		m.Media, m.part = md, part
 	}
 	m.SenderName = b.senderName(sender, e.Info.PushName)
+	m.QuoteName = b.quoteName(m.QuoteFrom)
 	b.dirty.Store(true)
 	return m
 }
@@ -673,6 +746,7 @@ func (b *Bridge) historySync(e *events.HistorySync) {
 	// An answer to recoverMedia: only its messages count, not the chat's
 	// state in it (unread, archived, names), nor any progress to show.
 	onDemand := e.Data.GetSyncType() == waHistorySync.HistorySync_ON_DEMAND
+	logf("history sync %s: %d chats, %d%%", e.Data.GetSyncType(), len(e.Data.GetConversations()), e.Data.GetProgress())
 	if onDemand {
 		logf("recover: on-demand history with %d chats", len(e.Data.GetConversations()))
 	}
@@ -715,12 +789,13 @@ func (b *Bridge) historySync(e *events.HistorySync) {
 		case conv.GetReadOnly():
 			readOnly = cantSend
 		}
-		// pinned is when it was pinned.
+		// pinned is when it was pinned. Only the first sync carries pins (the
+		// later ones say 0 for every chat): those keep what the app state set.
 		b.db.Exec(`INSERT INTO chats (jid, name, last_ts, unread, pinned, archived, mute_until, read_only, wa_jid, marked) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (jid) DO UPDATE SET
 				name = CASE WHEN excluded.name != '' THEN excluded.name ELSE name END,
 				last_ts = max(last_ts, excluded.last_ts), unread = excluded.unread,
-				pinned = excluded.pinned, archived = excluded.archived, mute_until = excluded.mute_until,
+				pinned = CASE WHEN excluded.pinned > 0 THEN excluded.pinned ELSE pinned END, archived = excluded.archived, mute_until = excluded.mute_until,
 				read_only = excluded.read_only, wa_jid = excluded.wa_jid, marked = excluded.marked`,
 			chat.String(), conv.GetName(), int64(conv.GetConversationTimestamp()), unread,
 			int64(conv.GetPinned()), conv.GetArchived(), mute, readOnly, jid.ToNonAD().String(), marked)
@@ -744,6 +819,9 @@ func (b *Bridge) historySync(e *events.HistorySync) {
 				status = 2
 			}
 			b.message(evt, status)
+			for _, r := range web.GetReactions() {
+				b.react(chat.String(), web.GetKey().GetID(), b.reactionSender(chat, r.GetKey()), r.GetText(), r.GetSenderTimestampMS()/1000)
+			}
 		}
 	}
 	if !onDemand {
@@ -970,7 +1048,7 @@ func (b *Bridge) load(chat, id string) *Msg {
 
 func (b *Bridge) query(where string, args ...any) []Msg {
 	// Media's columns don't clash with what callers filter on: chat and id are the join's.
-	rows, err := b.db.Query(`SELECT chat, id, sender, push_name, from_me, ts, text, quote, status, card,
+	rows, err := b.db.Query(`SELECT chat, id, sender, push_name, from_me, ts, text, quote, quote_from, quote_id, status, card,
 		COALESCE(kind, ''), COALESCE(mime, ''), COALESCE(seconds, 0), COALESCE(ptt, 0), proto
 		FROM messages LEFT JOIN media USING (chat, id) `+where, args...)
 	if err != nil {
@@ -985,7 +1063,7 @@ func (b *Bridge) query(where string, args ...any) []Msg {
 		var md Media
 		var card string
 		var blob []byte
-		if rows.Scan(&m.Chat, &m.ID, &m.Sender, &push, &m.FromMe, &m.TS, &m.Text, &m.Quote, &m.Status, &card, &md.Kind, &md.Mime, &md.Seconds, &md.PTT, &blob) != nil {
+		if rows.Scan(&m.Chat, &m.ID, &m.Sender, &push, &m.FromMe, &m.TS, &m.Text, &m.Quote, &m.QuoteFrom, &m.QuoteID, &m.Status, &card, &md.Kind, &md.Mime, &md.Seconds, &md.PTT, &blob) != nil {
 			continue
 		}
 		if md.Kind != "" {
@@ -1004,8 +1082,18 @@ func (b *Bridge) query(where string, args ...any) []Msg {
 			m.SenderName = b.senderName(j, push)
 			names[key] = m.SenderName
 		}
+		if m.QuoteFrom != "" {
+			if n, ok := names[m.QuoteFrom]; ok {
+				m.QuoteName = n
+			} else {
+				m.QuoteName = b.quoteName(m.QuoteFrom)
+				names[m.QuoteFrom] = m.QuoteName
+			}
+		}
 		out = append(out, m)
 	}
+	rows.Close()
+	b.withReactions(out)
 	return out
 }
 

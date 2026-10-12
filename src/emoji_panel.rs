@@ -3,7 +3,7 @@
 //! first. The smiley in the message box or Alt+E opens it.
 
 use crate::app::{App, Focus};
-use crate::ui::{box_corners, draw_deco, CAP_L, CAP_R, DAY_PILL, FIELD, GREEN, META_IN, SEARCH, TEXT};
+use crate::ui::{box_corners, draw_deco, CAP_L, CAP_R, DAY_PILL, FIELD, green, META_IN, SEARCH, TEXT};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use emojis::{Emoji, Group, UnicodeVersion};
 use ratatui::layout::{Position, Rect};
@@ -39,6 +39,9 @@ pub struct Panel {
     pub open: bool,
     /// The chat it opened in: another one closes it.
     chat: Option<String>,
+    /// Opened by the reaction bar's +: the message (chat, id) the chosen
+    /// emoji reacts to, instead of going into the message box.
+    pub react: Option<(String, String)>,
     query: String,
     found: Vec<&'static str>,
     /// Most recent first, kept in emoji_recent.json.
@@ -229,6 +232,7 @@ impl App {
         self.chat_menu.popup = None;
         let p = &mut self.emoji_panel;
         p.open = true;
+        p.react = None;
         p.chat = self.open.clone();
         p.query.clear();
         p.found.clear();
@@ -238,9 +242,24 @@ impl App {
         p.follow = true;
     }
 
+    /// The reaction bar's +: the panel, its emoji a reaction to (chat, id).
+    pub fn emoji_panel_react(&mut self, target: (String, String)) {
+        self.emoji_panel.open = false;
+        self.emoji_panel_toggle();
+        if self.emoji_panel.open {
+            self.emoji_panel.react = Some(target);
+        }
+    }
+
     /// The highlighted emoji, at the caret; the panel stays open, as on the Web.
+    /// Opened for a reaction, it reacts and closes.
     fn emoji_panel_insert(&mut self) {
         let Some(e) = self.emoji_panel.selected() else { return };
+        if let Some((chat, id)) = self.emoji_panel.react.take() {
+            self.emoji_panel.used(e);
+            self.emoji_panel.open = false;
+            return self.react(&chat, &id, e);
+        }
         let at = self.input.char_indices().nth(self.caret).map_or(self.input.len(), |(i, _)| i);
         self.input.insert_str(at, e);
         self.caret += e.chars().count();
@@ -407,7 +426,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         tabs.push(Span::styled(" ".repeat(mid - x), bg));
         tabs.push(Span::styled(*icon, Style::new().fg(if on { TEXT } else { META_IN }).bg(DAY_PILL)));
         x = mid + 1;
-        let (c, fg) = if on { ("━", GREEN) } else { ("─", RULE) };
+        let (c, fg) = if on { ("━", green()) } else { ("─", RULE) };
         rule.push(Span::styled(c.repeat(e - s), Style::new().fg(fg).bg(DAY_PILL)));
         tab_rects.push(Rect::new(area.x + 2 + s as u16, area.y + 1, (e - s) as u16, 2));
     }

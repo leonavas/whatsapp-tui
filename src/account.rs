@@ -6,7 +6,7 @@ use crate::app::{App, Phase};
 use crate::bridge::Profile;
 use crate::config::{self, Opt};
 use crate::update::{Note, State};
-use crate::ui::{avatar_cells, dim, CAP_L, CAP_R, draw_avatar, phone, truncate, wrap, GREEN, LINK_IN, TEXT};
+use crate::ui::{avatar_cells, dim, CAP_L, CAP_R, draw_avatar, phone, truncate, wrap, green, LINK_IN, TEXT};
 use chrono::{Datelike, Days, Local, TimeZone};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Margin, Position, Rect};
@@ -574,10 +574,10 @@ pub fn button(f: &mut Frame, app: &mut App, area: Rect) {
 /// The update button: its words and colours by where the update stands.
 fn update_pill(app: &App) -> Option<Line<'static>> {
     let (label, fg, bg) = match app.account.update.as_ref()? {
-        State::Available { ver, .. } => (format!("↑ {ver}"), Color::Black, GREEN),
+        State::Available { ver, .. } => (format!("↑ {ver}"), Color::Black, green()),
         // Faded while it works: there is nothing to click.
         State::Installing { .. } => ("atualizando…".into(), Color::DarkGray, Color::Indexed(236)),
-        State::Installed(_) => ("↻ reiniciar".into(), Color::Black, GREEN),
+        State::Installed(_) => ("↻ reiniciar".into(), Color::Black, green()),
     };
     Some(Line::from(vec![
         Span::styled(CAP_L, Style::new().fg(bg)),
@@ -595,7 +595,7 @@ fn head(f: &mut Frame, app: &mut App, area: Rect, under: &str, room: u16) {
         x += cols + 1;
     }
     let w = area.right().saturating_sub(x + 1);
-    let name_style = if app.account.menu.is_some() { Style::new().fg(GREEN).bold() } else { Style::new().fg(TEXT).bold() };
+    let name_style = if app.account.menu.is_some() { Style::new().fg(green()).bold() } else { Style::new().fg(TEXT).bold() };
     let lines = vec![
         Line::from(Span::styled(truncate(&my_name(app), w.saturating_sub(room) as usize), name_style)),
         Line::from(Span::styled(truncate(under, w as usize), dim())),
@@ -758,7 +758,7 @@ fn draw_settings(f: &mut Frame, app: &mut App) {
         if n > 0 {
             lines.push((None, Line::default()));
         }
-        lines.push((None, Line::from(format!(" {heading}")).style(Style::new().fg(GREEN).bold())));
+        lines.push((None, Line::from(format!(" {heading}")).style(Style::new().fg(green()).bold())));
         for o in *opts {
             let mark = if app.settings.on(*o) { "[✓]" } else { "[ ]" };
             lines.push((Some(i), Line::from(format!("{mark} {}", o.label))));
@@ -780,7 +780,7 @@ fn draw_settings(f: &mut Frame, app: &mut App) {
             f.render_widget(Paragraph::new(line), row);
             continue;
         };
-        let mark = if i == sel { Span::styled("› ", Style::new().fg(GREEN).bold()) } else { Span::raw("  ") };
+        let mark = if i == sel { Span::styled("› ", Style::new().fg(green()).bold()) } else { Span::raw("  ") };
         let style = if i == sel { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };
         let mut spans = vec![mark];
         spans.extend(line.spans.into_iter().map(|s| s.patch_style(style)));
@@ -794,7 +794,7 @@ fn draw_about(f: &mut Frame, app: &mut App) {
     let hint = "Enter abre o link · Esc fecha";
     let lines = vec![
         Line::default(),
-        Line::from("WhatsApp TUI").style(Style::new().fg(GREEN).bold()),
+        Line::from("WhatsApp TUI").style(Style::new().fg(green()).bold()),
         Line::from(format!("versão {}", env!("CARGO_PKG_VERSION"))).style(dim()),
         Line::default(),
         Line::from(REPO).style(Style::new().fg(LINK_IN).underlined()),
@@ -833,7 +833,7 @@ fn draw_profile(f: &mut Frame, app: &mut App) {
     // Your number where the button shows the connection.
     let number = app.my_jid().map(|j| phone(&j)).unwrap_or_default();
     head(f, app, Rect::new(inner.x.saturating_sub(1), inner.y + 1, inner.width + 1, 2), &number, 0);
-    let mut lines = vec![Line::from(Span::styled("Recado", Style::new().fg(GREEN).bold()))];
+    let mut lines = vec![Line::from(Span::styled("Recado", Style::new().fg(green()).bold()))];
     lines.extend(about.into_iter().map(|l| Line::from(format!(" {l}"))));
     lines.push(Line::default());
     lines.push(Line::from("Esc fecha").style(dim()));

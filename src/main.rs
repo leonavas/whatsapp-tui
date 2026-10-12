@@ -21,10 +21,13 @@ mod ipc;
 mod links;
 mod markup;
 mod media;
+mod msgmenu;
 mod player;
+mod react;
 mod ticks;
 mod tray;
 mod shortcuts;
+mod theme;
 mod ui;
 mod update;
 mod video;
@@ -124,6 +127,8 @@ fn main() {
     let picker = ratatui_image::picker::Picker::from_query_stdio()
         .ok()
         .filter(|p| p.protocol_type() != ratatui_image::picker::ProtocolType::Halfblocks);
+    // The theme's greens, also asked of the terminal before the reader starts.
+    let mut theme = theme::Watch::start();
     let mut app = app::App::new(tx.clone(), picker, owner);
     app.starting();
 
@@ -164,6 +169,7 @@ fn main() {
                 let _ = term.clear();
             }
         }
+        theme.poll();
         app.publish();
         // Dropping it takes it off the bar.
         if (owner && app.settings.on(config::TRAY)) != tray.is_some() {

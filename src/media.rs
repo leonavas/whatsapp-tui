@@ -34,6 +34,8 @@ pub struct PicSpot {
     pub id: String,
     pub video: bool,
     pub gif: bool,
+    /// Without a bubble, its see-through parts kept.
+    pub sticker: bool,
     pub secs: u32,
     pub thumb: String,
     pub file: String,
@@ -50,6 +52,7 @@ impl PicSpot {
             id: m.id.clone(),
             video: md.kind == "video",
             gif: md.gif,
+            sticker: md.kind == "sticker",
             secs: md.seconds,
             thumb: md.thumb.clone(),
             file: md.file.clone(),
@@ -58,9 +61,11 @@ impl PicSpot {
 }
 
 /// The message's photo or video, when its bubble shows one: a video always
-/// does (dark until there's a picture), a photo once there's something.
+/// does (dark until there's a picture); a photo too, its room kept (by its
+/// size, or its thumbnail) while it downloads by itself.
 pub fn shown(m: &Msg) -> Option<&Media> {
-    m.media.as_ref().filter(|md| md.kind == "video" || (md.kind == "image" && (!md.thumb.is_empty() || !md.file.is_empty())))
+    let known = |md: &&Media| !md.thumb.is_empty() || !md.file.is_empty() || (md.width > 0 && md.height > 0);
+    m.media.as_ref().filter(|md| md.kind == "video" || (md.kind == "image" && known(md)))
 }
 
 /// The picture's size in cells for `room` columns, kept to its shape.
@@ -137,7 +142,10 @@ pub fn draw(f: &mut Frame, app: &mut App, s: &PicSpot, rect: Rect) {
         });
         let (w, h) = (rect.width as u32 * cell.0, rect.height as u32 * cell.1);
         let center = middle(rect, cell);
-        let pic = compose(img, w, h, cell, center, overlay.as_ref().map(|(l, busy)| (l.as_str(), *busy)), false);
+        let pic = match img {
+            Some(i) if s.sticker => contain(i, w, h),
+            _ => compose(img, w, h, cell, center, overlay.as_ref().map(|(l, busy)| (l.as_str(), *busy)), false),
+        };
         let Some(picker) = app.picker.as_ref() else { return };
         let Ok(p) = picker.new_protocol(pic, Rect::new(0, 0, rect.width, rect.height).into(), Resize::Fit(None)) else { return };
         app.protocols.insert(key.clone(), p);
@@ -146,6 +154,15 @@ pub fn draw(f: &mut Frame, app: &mut App, s: &PicSpot, rect: Rect) {
     if loading {
         spinner(f, rect);
     }
+}
+
+/// The whole picture within `w`×`h` pixels, in the middle, the rest (and
+/// its own see-through parts) see-through: a sticker.
+pub(crate) fn contain(img: &DynamicImage, w: u32, h: u32) -> DynamicImage {
+    let fit = img.resize(w, h, FilterType::CatmullRom).to_rgba8();
+    let mut out = RgbaImage::new(w, h);
+    image::imageops::overlay(&mut out, &fit, ((w - fit.width()) / 2) as i64, ((h - fit.height()) / 2) as i64);
+    DynamicImage::ImageRgba8(out)
 }
 
 /// The spinner over the disc in the middle of `rect`, in a cell of its color.

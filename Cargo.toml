@@ -1,6 +1,6 @@
 [package]
 name = "whatsapp-tui"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2021"
 description = "A lightweight WhatsApp client for the terminal"
 license = "Apache-2.0"

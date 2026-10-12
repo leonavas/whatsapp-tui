@@ -52,6 +52,17 @@ pub struct Msg {
     pub text: String,
     #[serde(default)]
     pub quote: String,
+    /// Who wrote the quoted message, and the name its quote shows.
+    #[serde(default)]
+    pub quote_from: String,
+    #[serde(default)]
+    pub quote_name: String,
+    /// The quoted message's id: a click on the quote goes to it.
+    #[serde(default)]
+    pub quote_id: String,
+    /// The emojis under it, the most used first.
+    #[serde(default)]
+    pub reactions: Vec<Reaction>,
     /// A photo, video, audio, document or sticker, downloadable on demand.
     #[serde(default)]
     pub media: Option<Media>,
@@ -63,6 +74,15 @@ pub struct Msg {
     pub unavailable: bool,
     /// 0 pending, 1 sent, 2 delivered, 3 read.
     pub status: u8,
+}
+
+/// One emoji under a message: how many sent it, and whether you did.
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct Reaction {
+    pub emoji: String,
+    pub count: u32,
+    pub mine: bool,
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
@@ -211,6 +231,8 @@ pub enum Event {
         #[serde(default)]
         deleted: bool,
     },
+    /// Messages deleted for you, here or on another device.
+    Removed { chat: String, ids: Vec<String> },
     Typing { chat: String, who: String, on: bool },
     Search {
         query: String,
@@ -343,6 +365,8 @@ impl Bridge {
     pub fn spawn(tx: Sender<Ev>) -> Result<Bridge, String> {
         let data = data_dir();
         std::fs::create_dir_all(&data).map_err(|e| format!("não criou {}: {e}", data.display()))?;
+        // The last run's log kept beside, for what happened before a restart.
+        let _ = std::fs::rename(data.join("bridge.log"), data.join("bridge.log.1"));
         let log = std::fs::File::create(data.join("bridge.log")).map_err(|e| e.to_string())?;
         let mut child = Command::new(program()?)
             .arg(&data)

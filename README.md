@@ -84,9 +84,10 @@ The first start shows a QR code: scan it in WhatsApp on your phone, under
 | `i` | the contact's or group's details |
 | `Space` | play or pause the open chat's last audio |
 | `v` | open the open chat's last video in the viewer |
-| `Space` / `Enter`, `o`, `Esc` / `q` | in the viewer: play or stop the video, open it outside the app, close |
+| `Space` / `Enter`, `b`, `p`, `o`, `Esc` / `q` | in the viewer: play or stop the video, save it to your downloads folder, save it and show it in the file manager, open it outside the app, close |
 | `PgUp` `PgDn` | scroll the conversation |
 | `Enter` / `Shift+Enter` | send / new line |
+| `↑` in an empty message box | edit your last message (within 15 minutes; `Esc` gives up) |
 | `Ctrl+B` / `Ctrl+I` | bold / italic (`Alt+B` / `Alt+I` where the terminal keeps them) |
 | `Ctrl+Shift+X` `M` `C` | strikethrough, monospace, code (`Alt+X` `Alt+M` `Alt+C` too) |
 | `Ctrl+Shift+9` | make the line a quote, or not |
@@ -104,6 +105,13 @@ The mouse works too: click chats, links, audio players, photos and videos (open
 them in the viewer; a click outside the picture closes it), a business message's link buttons, the clip
 and the smiley in the message box, and your name at the foot of the chat
 list; right-click a chat (or click the chevron by its time) for its menu.
+
+Hovering a message shows a chevron in its corner (a right-click does the
+same) with its menu: **Copiar**, **Editar** (yours, for 15 minutes),
+**Reagir** and **Apagar**. Apagar puts a checkbox by each message to pick
+more of them (`Esc` leaves, `Enter` or the trash asks); then **Apagar para
+mim**, or **Apagar para todos** when every one picked is yours, about two and
+a half days old at most, and not in the chat with yourself.
 
 ## Photos and videos
 

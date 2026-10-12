@@ -175,6 +175,8 @@ pub struct App {
     pub archived: bool,
     /// The chat menu (archive, pin, mute…).
     pub chat_menu: crate::chatmenu::ChatMenu,
+    /// A message's menu, the messages picked to delete, the one being edited.
+    pub msg_menu: crate::msgmenu::MsgMenu,
     pub found: Option<Found>,
     /// When to ask the bridge about the search text (after a pause in typing).
     search_due: Option<Instant>,
@@ -208,6 +210,16 @@ pub struct App {
     pub header_area: Rect,
     /// The round button down to the newest message, while scrolled up.
     pub newest_btn: Rect,
+    /// A message just gone to from its quote, lit behind for a moment.
+    pub flash: Option<(String, Instant)>,
+    /// The bubbles on screen, from the last draw.
+    pub bubbles: Vec<crate::react::Hit>,
+    /// The message the pointer's over: its smiley shows.
+    pub hover_msg: Option<String>,
+    /// That smiley, and its message.
+    pub react_btn: Option<(Rect, String)>,
+    /// The reactions' bar, open over a message.
+    pub react_bar: Option<crate::react::Bar>,
     pub panel_area: Rect,
     pub panel_close: Rect,
     /// Group members in the panel, to open a chat with.
@@ -233,6 +245,10 @@ pub struct App {
     fetched: HashSet<(String, String)>,
     /// A photo or video opened outside the app once it's downloaded.
     pub(crate) open_when_ready: Option<(String, String)>,
+    /// Downloading to save to the downloads folder; true to show it there after.
+    pub(crate) save_when_ready: Option<(String, String, bool)>,
+    /// Where each message's media was saved, by (chat, id).
+    pub(crate) saved: HashMap<(String, String), std::path::PathBuf>,
     /// Real pictures (kitty, sixel, iTerm2); None in terminals without them.
     pub picker: Option<Picker>,
     pub avatars: HashMap<String, Avatar>,
@@ -279,6 +295,7 @@ impl App {
             filter: Filter::All,
             archived: false,
             chat_menu: Default::default(),
+            msg_menu: Default::default(),
             found: None,
             search_due: None,
             names: HashMap::new(),
@@ -308,6 +325,11 @@ impl App {
             panel_maps: Rect::default(),
             msg_links: Vec::new(),
             newest_btn: Rect::default(),
+            flash: None,
+            bubbles: Vec::new(),
+            hover_msg: None,
+            react_btn: None,
+            react_bar: None,
             audio_hits: Vec::new(),
             player: crate::player::Player::new(tx.clone()),
             media_hits: Vec::new(),
@@ -317,6 +339,8 @@ impl App {
             pictures: HashMap::new(),
             fetched: HashSet::new(),
             open_when_ready: None,
+            save_when_ready: None,
+            saved: HashMap::new(),
             picker,
             avatars: HashMap::new(),
             protocols: HashMap::new(),
@@ -683,7 +707,10 @@ impl App {
             }
             Event::Paired => self.phase = Phase::Connecting,
             Event::Connecting { name, me } => {
-                self.me_name = name;
+                // Kept when the session doesn't have it (yet).
+                if !name.is_empty() {
+                    self.me_name = name;
+                }
                 self.me = me;
                 if self.phase == Phase::Starting {
                     self.phase = Phase::Connecting
@@ -765,6 +792,7 @@ impl App {
                     self.cmd(json!({"c": "history", "chat": chat, "limit": 400}));
                 }
             }
+            Event::Removed { chat, ids } => self.removed(&chat, &ids),
             Event::Read { chat } => {
                 if let Some(c) = self.chats.iter_mut().find(|c| c.jid == chat) {
                     c.unread = 0;
@@ -921,6 +949,14 @@ impl App {
                 self.note(error);
             }
         }
+        if let Some((_, _, reveal)) = self.save_when_ready.clone().filter(|(c, i, _)| c == chat && i == id) {
+            self.save_when_ready = None;
+            if error.is_empty() {
+                self.save_media(chat, id, reveal);
+            } else {
+                self.note(error);
+            }
+        }
         self.viewer_media(chat, id, error);
     }
 
@@ -1048,11 +1084,11 @@ impl App {
             return;
         }
         // The account menu's and dialogs' first: they cover everything.
-        if self.account_key(k) || self.chat_menu_key(k) {
+        if self.account_key(k) || self.chat_menu_key(k) || self.msg_menu_key(k) {
             return;
         }
         // The emoji panel's and popup's keys come first, their Esc before the info panel's.
-        if self.emoji_panel_key(k) || self.emoji_key(k) || self.attach_key(k) {
+        if self.react_key(k) || self.emoji_panel_key(k) || self.emoji_key(k) || self.attach_key(k) {
             return;
         }
         let page = (self.msgs_area.height as usize / 2).max(1);
@@ -1205,7 +1241,9 @@ impl App {
         }
         match k.code {
             KeyCode::Enter if !self.sends(k) => self.newline(),
+            KeyCode::Enter if self.msg_menu.editing.is_some() => self.send_edit(),
             KeyCode::Enter => self.send(),
+            KeyCode::Esc if self.msg_menu.editing.is_some() => self.cancel_edit(),
             KeyCode::Esc | KeyCode::Tab => self.focus = Focus::Sidebar,
             KeyCode::Backspace if self.caret > 0 => {
                 self.caret -= 1;
@@ -1214,6 +1252,8 @@ impl App {
             KeyCode::Delete if self.caret < self.input.chars().count() => self.remove_at(self.caret),
             KeyCode::Left => self.caret = self.caret.saturating_sub(1),
             KeyCode::Right => self.caret = (self.caret + 1).min(self.input.chars().count()),
+            // As on WhatsApp Web: Up in an empty box edits your last message.
+            KeyCode::Up if self.input.is_empty() && self.edit_last() => {}
             KeyCode::Up => self.caret_line(-1),
             KeyCode::Down => self.caret_line(1),
             KeyCode::Home => self.caret = 0,
@@ -1280,7 +1320,7 @@ impl App {
     }
 
     fn mouse(&mut self, m: MouseEvent) {
-        if self.viewer_mouse(m) || self.chat_menu_mouse(m) || self.account_mouse(m) || self.emoji_panel_mouse(m) || self.emoji_click(m) || self.attach_mouse(m) {
+        if self.viewer_mouse(m) || self.chat_menu_mouse(m) || self.account_mouse(m) || self.msg_menu_mouse(m) || self.emoji_panel_mouse(m) || self.emoji_click(m) || self.attach_mouse(m) || self.react_mouse(m) {
             return;
         }
         let at = Position::new(m.column, m.row);
