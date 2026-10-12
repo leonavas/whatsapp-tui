@@ -226,6 +226,7 @@ impl App {
             return;
         }
         self.attach.menu = None;
+        self.chat_menu.popup = None;
         let p = &mut self.emoji_panel;
         p.open = true;
         p.chat = self.open.clone();

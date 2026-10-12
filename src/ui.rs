@@ -288,6 +288,13 @@ pub(crate) fn avatar_cells(app: &App) -> Option<(u16, u16)> {
     Some((cols, 2))
 }
 
+/// Shrinking with a smooth filter (the default, nearest, is jagged); a
+/// cheaper one for big pictures, so encoding them doesn't stall a frame.
+pub(crate) fn fit(img: &DynamicImage) -> Resize {
+    let big = img.width() as u64 * img.height() as u64 > 1_000_000;
+    Resize::Fit(Some(if big { ratatui_image::FilterType::Triangle } else { ratatui_image::FilterType::CatmullRom }))
+}
+
 pub(crate) fn draw_avatar(f: &mut Frame, app: &mut App, jid: &str, group: bool, rect: Rect) {
     let Some(picker) = app.picker.as_ref() else { return };
     let key = (jid.to_string(), rect.width, rect.height);
@@ -306,7 +313,8 @@ pub(crate) fn draw_avatar(f: &mut Frame, app: &mut App, jid: &str, group: bool, 
             image::imageops::overlay(&mut canvas, &img.to_rgba8(), 0, ((tall - side) / 2) as i64);
             img = DynamicImage::ImageRgba8(canvas);
         }
-        let Ok(p) = picker.new_protocol(img, Rect::new(0, 0, rect.width, rect.height).into(), Resize::Fit(None)) else { return };
+        let fit = crate::ui::fit(&img);
+        let Ok(p) = picker.new_protocol(img, Rect::new(0, 0, rect.width, rect.height).into(), fit) else { return };
         app.protocols.insert(key.clone(), p);
     }
     f.render_widget(Image::new(&app.protocols[&key]), rect);
@@ -351,6 +359,7 @@ fn main_view(f: &mut Frame, app: &mut App, area: Rect) {
     crate::emoji::draw(f, app);
     crate::emoji_panel::draw(f, app);
     crate::attach::draw_menu(f, app);
+    crate::chatmenu::draw(f, app);
     crate::account::draw(f, app);
     // Last, so only what's still a link on screen becomes one for the terminal.
     let is_link = |c: &ratatui::buffer::Cell| c.modifier.contains(Modifier::UNDERLINED) && (c.fg == LINK_IN || c.fg == LINK_OUT);
@@ -385,21 +394,27 @@ fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     search.push(Span::styled(" ".repeat(pad), Style::new().bg(FIELD)));
     search.push(Span::styled(CAP_R, Style::new().fg(FIELD)));
 
-    // The chips: All, Unread, Groups.
-    let unread = app.chats.iter().filter(|c| c.unread > 0).count();
+    // The chips: All, Unread, Favorites, Groups. Unread counts the list shown.
+    let unread = app.chats.iter().filter(|c| c.unread > 0 && c.archived == app.archived).count();
     let chips = [
         (Filter::All, "Tudo".to_string()),
         (Filter::Unread, if unread > 0 { format!("Não lidas {unread}") } else { "Não lidas".into() }),
+        (Filter::Favorites, "Favoritas".into()),
         (Filter::Groups, "Grupos".into()),
     ];
     let mut chip_spans = vec![Span::raw(" ")];
     let mut x = area.x + 1;
     app.chips.clear();
+    // Four of them: without the space inside the pills when the column is narrow.
+    let tight = 1 + chips.iter().map(|(_, l)| l.width() + 5).sum::<usize>() > area.width as usize;
     for (filter, label) in chips {
         let (fg, bg) = if app.filter == filter { (CHIP_ON_TEXT, CHIP_ON) } else { (META_IN, FIELD) };
-        let w = label.width() as u16 + 4;
-        app.chips.push((Rect::new(x, area.y + 2, w, 1), filter));
-        chip_spans.extend(pill(format!(" {label} "), fg, bg));
+        let text = if tight { label } else { format!(" {label} ") };
+        let w = text.width() as u16 + 2;
+        if x + w <= area.right() {
+            app.chips.push((Rect::new(x, area.y + 2, w, 1), filter));
+        }
+        chip_spans.extend(pill(text, fg, bg));
         chip_spans.push(Span::raw(" "));
         x += w + 1;
     }
@@ -415,10 +430,11 @@ fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     let list = Rect { y: area.y + 4, height: area.height.saturating_sub(4), ..area };
     app.side_list = list;
     app.side_hits.clear();
+    app.chat_menu.chevron = None;
     let cells = avatar_cells(app).filter(|_| app.settings.on(crate::config::PHOTOS));
     let items = app.items();
     if items.is_empty() {
-        let msg = if app.filter == Filter::All { "Nenhuma conversa ainda" } else { "Nada encontrado" };
+        let msg = if app.filter == Filter::All && !app.archived { "Nenhuma conversa ainda" } else { "Nada encontrado" };
         f.render_widget(Paragraph::new(format!(" {msg}")).style(Style::new().fg(META_IN)), list);
         return;
     }
@@ -467,10 +483,21 @@ fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         match item {
             Item::Header(t) => lines.push(Line::from(Span::styled(format!(" {t}"), Style::new().fg(GREEN)))),
             Item::Info(t) => lines.push(Line::from(Span::styled(format!(" {t}"), Style::new().fg(META_IN)))),
+            Item::Archived => {
+                // How many archived chats wait, green while any does.
+                let n = app.chats.iter().filter(|c| c.archived && c.unread > 0).count();
+                let count = Span::styled(n.to_string(), Style::new().fg(if n > 0 { GREEN } else { META_IN }));
+                lines.push(lead_row(crate::chatmenu::ARCHIVE, Span::styled("Arquivadas", Style::new().fg(TEXT)), Some(count), width, avatar_w, on));
+            }
+            Item::Back => lines.push(lead_row("←", Span::styled("Arquivadas", Style::new().fg(TEXT).bold()), None, width, avatar_w, on)),
             Item::Chat(c) => {
                 lines.extend(chat_item(c, width, avatar_w, on, app.typing.contains_key(&c.jid), app.draft_line(&c.jid)));
                 pictures.push((y, c.jid.clone(), c.group));
                 statuses.push((y, h, c.status));
+                // The chevron chat_item put by the time opens its menu.
+                if on {
+                    app.chat_menu.chevron = Some((Rect::new(inner.x + width.saturating_sub(3) as u16, y, 3, 1), c.jid.clone()));
+                }
             }
             Item::Contact(c) => {
                 lines.extend(contact_item(&c.name, &phone(&c.jid), Style::new().fg(META_IN), width, avatar_w, on));
@@ -524,7 +551,8 @@ fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     }
     if let Some((w, _)) = cells {
         for (y, jid, group) in pictures {
-            draw_avatar(f, app, &jid, group, Rect::new(inner.x + 1, y, w, 3));
+            // On the two lines of text, centered with them; the air row stays below.
+            draw_avatar(f, app, &jid, group, Rect::new(inner.x + 1, y, w, 2));
         }
     }
     for (x, y, status) in tick_cells {
@@ -540,6 +568,24 @@ pub(crate) fn display_name(name: &str, jid: &str) -> String {
     } else {
         name.to_string()
     }
+}
+
+/// A one-line row with an icon where the pictures go, its text and, at the
+/// right, `right`: "Arquivadas" and its count, "← Arquivadas".
+fn lead_row(icon: &str, text: Span<'static>, right: Option<Span<'static>>, width: usize, avatar: Option<u16>, lit: bool) -> Line<'static> {
+    let bg = if lit { Style::new().bg(SELECTED) } else { Style::new() };
+    // The icon in the middle of the picture's column.
+    let (before, after) = match avatar {
+        Some(w) => (1 + (w as usize).saturating_sub(1) / 2, (w as usize + 2).saturating_sub(2 + (w as usize).saturating_sub(1) / 2)),
+        None => (1, 2),
+    };
+    let mut spans = vec![Span::raw(" ".repeat(before)), Span::styled(icon.to_string(), Style::new().fg(META_IN)), Span::raw(" ".repeat(after.max(1))), text];
+    let right_w = right.as_ref().map_or(0, |r| r.content.width());
+    let used: usize = spans.iter().map(|s| s.content.width()).sum();
+    spans.push(Span::raw(" ".repeat(width.saturating_sub(used + right_w + 1))));
+    spans.extend(right);
+    spans.push(Span::raw(" "));
+    Line::from(spans).style(bg)
 }
 
 /// Room on the left for the picture, drawn over these cells afterwards.
@@ -637,35 +683,41 @@ fn chat_item(c: &Chat, width: usize, avatar: Option<u16>, lit: bool, typing: boo
     let time = short_time(c.last_ts);
     let inner = width.saturating_sub(lead.width() + 1);
 
-    let name_style = match (unread, c.archived) {
-        (true, _) => Style::new().fg(TEXT).bold(),
-        (false, true) => dim(),
-        _ => Style::new().fg(TEXT),
-    };
-    let name = truncate(&display_name(&c.name, &c.jid), inner.saturating_sub(time.width() + 1));
-    let gap = inner.saturating_sub(name.width() + time.width());
+    let name_style = if unread { Style::new().fg(TEXT).bold() } else { Style::new().fg(TEXT) };
+    // The lit row's chevron after the time, as WhatsApp Web's on hover: its menu.
+    let chevron = if lit { format!(" {DOWN}") } else { String::new() };
+    let name = truncate(&display_name(&c.name, &c.jid), inner.saturating_sub(time.width() + chevron.width() + 1));
+    let gap = inner.saturating_sub(name.width() + time.width() + chevron.width());
     let time_style = if unread && !c.muted { Style::new().fg(GREEN) } else { Style::new().fg(META_IN) };
     let top = Line::from(vec![
         Span::raw(lead.clone()),
         Span::styled(name, name_style),
         Span::raw(" ".repeat(gap)),
         Span::styled(time, time_style),
+        Span::styled(chevron, Style::new().fg(META_IN)),
         Span::raw(" "),
     ])
     .style(bg);
 
+    // At the preview's end, as on WhatsApp Web: muted, pinned, the count.
     let mut right: Vec<Span> = Vec::new();
-    if c.muted {
-        right.push(Span::styled("🔕", Style::new().fg(META_IN)));
-    }
-    if c.pinned {
-        right.push(Span::styled("📌", Style::new().fg(META_IN)));
+    let icon = Style::new().fg(META_IN);
+    for (on, glyph) in [(c.muted, crate::chatmenu::MUTED), (c.pinned, crate::chatmenu::PINNED)] {
+        if on {
+            if !right.is_empty() {
+                right.push(Span::raw(" "));
+            }
+            right.push(Span::styled(glyph, icon));
+        }
     }
     if unread {
+        if !right.is_empty() {
+            right.push(Span::raw(" "));
+        }
         let badge = if c.muted { META_IN } else { GREEN };
         right.extend(pill(c.unread.to_string(), Color::Black, badge));
     }
-    let right_w: usize = right.iter().map(|s| s.content.width()).sum::<usize>() + usize::from(c.muted && c.pinned);
+    let right_w: usize = right.iter().map(|s| s.content.width()).sum();
     let mut left: Vec<Span> = vec![Span::raw(lead)];
     let room = inner.saturating_sub(right_w + 1);
     if typing {
@@ -689,12 +741,7 @@ fn chat_item(c: &Chat, width: usize, avatar: Option<u16>, lit: bool, typing: boo
     }
     let used: usize = left.iter().map(|s| s.content.width()).sum();
     left.push(Span::raw(" ".repeat((width.saturating_sub(1)).saturating_sub(used + right_w))));
-    for (i, s) in right.into_iter().enumerate() {
-        if i == 1 && c.muted && c.pinned {
-            left.push(Span::raw(" "));
-        }
-        left.push(s);
-    }
+    left.extend(right);
     left.push(Span::raw(" "));
     [top, Line::from(left).style(bg)]
 }
@@ -1637,7 +1684,8 @@ fn draw_big_picture(f: &mut Frame, app: &mut App, jid: &str, group: bool, rect: 
             (Some(img), _) | (None, Some(Avatar::Ready(img))) => crate::avatar::round(img, side),
             _ => crate::avatar::silhouette(side, group),
         };
-        let Ok(p) = picker.new_protocol(img, Rect::new(0, 0, rect.width, rect.height).into(), Resize::Fit(None)) else { return };
+        let fit = crate::ui::fit(&img);
+        let Ok(p) = picker.new_protocol(img, Rect::new(0, 0, rect.width, rect.height).into(), fit) else { return };
         app.protocols.insert(key.clone(), p);
     }
     f.render_widget(Image::new(&app.protocols[&key]), rect);
@@ -1666,11 +1714,12 @@ fn status_bar(f: &mut Frame, app: &App, area: Rect) {
     }
     let (send, newline) = if app.settings.on(crate::config::ENTER_SENDS) { ("Enter", "Alt+Enter") } else { ("Alt+Enter", "Enter") };
     let hints: String = match app.focus {
-        _ if app.account.menu.is_some() || app.account.settings.is_some() => " ↑↓ move · Enter escolhe · Esc fecha".into(),
+        _ if app.account.menu.is_some() || app.account.settings.is_some() || app.chat_menu.popup.is_some() => " ↑↓ move · Enter escolhe · Esc fecha".into(),
         _ if app.account.about => " Enter abre o link · Esc fecha".into(),
         _ if app.account.profile.is_some() => " Esc fecha".into(),
         Focus::Input if app.emoji_panel.open => " digite para buscar · ←↑↓→ escolhe · Enter insere · Tab categorias · Esc fecha".into(),
-        Focus::Sidebar => " ↑↓ conversas · Enter abre · / busca ou número · 1 2 3 filtros · i dados · Espaço áudio · Tab mensagem · Alt+S menu · q sai".into(),
+        Focus::Sidebar if app.archived => " ↑↓ conversas · Enter abre · m opções · Esc volta · / busca · 1 2 3 4 filtros · i dados · Tab mensagem · q sai".into(),
+        Focus::Sidebar => " ↑↓ conversas · Enter abre · m opções · / busca ou número · 1 2 3 4 filtros · i dados · Espaço áudio · Tab mensagem · Alt+S menu · q sai".into(),
         Focus::Search => " digite para filtrar · ↑↓ escolhe · Enter abre · Esc limpa".into(),
         Focus::Input => format!(" {send} envia · {newline} quebra linha · Alt+E emojis · Alt+A anexa · Ctrl+B negrito · Ctrl+I itálico · Ctrl+V cola · PgUp/PgDn rola · Esc conversas · Alt+S menu · Ctrl+C sai"),
     };

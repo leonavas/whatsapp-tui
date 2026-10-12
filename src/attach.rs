@@ -14,7 +14,7 @@ use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph};
 use ratatui::Frame;
-use ratatui_image::{Image, Resize};
+use ratatui_image::Image;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -24,8 +24,8 @@ use unicode_width::UnicodeWidthStr;
 
 /// A card: three rows inside a rounded border.
 const CARD_ROWS: u16 = 5;
-const MENU_BG: Color = Color::Rgb(0x23, 0x31, 0x38);
-const MENU_HOVER: Color = Color::Rgb(0x18, 0x22, 0x29);
+pub(crate) const MENU_BG: Color = Color::Rgb(0x23, 0x31, 0x38);
+pub(crate) const MENU_HOVER: Color = Color::Rgb(0x18, 0x22, 0x29);
 const CARD_EDGE: Color = Color::Rgb(0x55, 0x58, 0x58);
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize, Debug)]
@@ -184,8 +184,9 @@ impl App {
     fn open_menu(&mut self) {
         if self.can_attach().is_some() {
             self.attach.menu = Some(0);
-            // One popup at a time over the box.
+            // One popup at a time.
             self.emoji_panel.open = false;
+            self.chat_menu.popup = None;
         }
     }
 
@@ -433,7 +434,8 @@ pub fn draw_strip(f: &mut Frame, app: &mut App, area: Rect) {
             if !app.protocols.contains_key(&pkey) {
                 let thumb = app.attached().iter().find(|a| a.key == *key).and_then(|a| a.thumb.clone());
                 if let (Some(img), Some(picker)) = (thumb, app.picker.as_ref()) {
-                    if let Ok(p) = picker.new_protocol(img, Rect::new(0, 0, inside.width, inside.height).into(), Resize::Fit(None)) {
+                    let fit = crate::ui::fit(&img);
+                    if let Ok(p) = picker.new_protocol(img, Rect::new(0, 0, inside.width, inside.height).into(), fit) {
                         app.protocols.insert(pkey.clone(), p);
                     }
                 }

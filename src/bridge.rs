@@ -21,8 +21,13 @@ pub struct Chat {
     pub last_ts: i64,
     pub unread: u32,
     pub pinned: bool,
+    /// When it was pinned: the last pinned comes first.
+    #[serde(default)]
+    pub pin_ts: i64,
     pub archived: bool,
     pub muted: bool,
+    #[serde(default)]
+    pub favorite: bool,
     pub preview: String,
     pub from_me: bool,
     /// The last message's, when it's ours.
@@ -165,6 +170,12 @@ pub enum Event {
     Unread { chat: String, msgs: Vec<Msg> },
     Status { chat: String, ids: Vec<String>, status: u8 },
     Read { chat: String },
+    /// A chat's messages cleared, or the chat deleted, here or on the phone.
+    Cleared {
+        chat: String,
+        #[serde(default)]
+        deleted: bool,
+    },
     Typing { chat: String, who: String, on: bool },
     Search {
         query: String,

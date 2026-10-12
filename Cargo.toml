@@ -1,6 +1,6 @@
 [package]
 name = "whatsapp-tui"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "A lightweight WhatsApp client for the terminal"
 license = "Apache-2.0"
@@ -11,6 +11,8 @@ crossterm = "0.29"
 emojis = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The release check and download (`update`), as slick does it; tar unpacks.
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 unicode-width = "0.2"
 qrcode = { version = "0.14", default-features = false }

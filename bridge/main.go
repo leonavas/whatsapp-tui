@@ -24,7 +24,9 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/rs/zerolog"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/store"
@@ -55,14 +57,17 @@ type Msg struct {
 
 // Chat is one row of the sidebar.
 type Chat struct {
-	JID      string `json:"jid"`
-	Name     string `json:"name"`
-	Group    bool   `json:"group"`
-	LastTS   int64  `json:"last_ts"`
-	Unread   int    `json:"unread"`
-	Pinned   bool   `json:"pinned"`
+	JID    string `json:"jid"`
+	Name   string `json:"name"`
+	Group  bool   `json:"group"`
+	LastTS int64  `json:"last_ts"`
+	Unread int    `json:"unread"`
+	Pinned bool   `json:"pinned"`
+	// When it was pinned: the newest pin comes first.
+	PinTS    int64  `json:"pin_ts"`
 	Archived bool   `json:"archived"`
 	Muted    bool   `json:"muted"`
+	Favorite bool   `json:"favorite"`
 	Preview  string `json:"preview"`
 	FromMe   bool   `json:"from_me"`
 	// The last message's, when it's ours: 0 pending … 3 read.
@@ -87,6 +92,10 @@ type Cmd struct {
 	Temp    bool   `json:"temp"`
 	// read: without read receipts, only your other devices hear of it.
 	Quiet bool `json:"quiet"`
+	// chat_action: archive, unarchive, pin, unpin, read, unread, mute
+	// (for Secs, 0 is forever), unmute, favorite, unfavorite, clear, delete.
+	Action string `json:"action"`
+	Secs   int64  `json:"secs"`
 }
 
 var (
@@ -128,6 +137,8 @@ type Bridge struct {
 	dir     string
 	dirty   atomic.Bool
 	avatars chan avatarReq
+	// Chat actions, one at a time and in order: a pin and its undo can't swap.
+	actions chan Cmd
 }
 
 type avatarReq struct {
@@ -152,7 +163,17 @@ CREATE TABLE IF NOT EXISTS chats (
 	pinned INTEGER NOT NULL DEFAULT 0,
 	archived INTEGER NOT NULL DEFAULT 0,
 	mute_until INTEGER NOT NULL DEFAULT 0,
-	read_only TEXT NOT NULL DEFAULT ''
+	read_only TEXT NOT NULL DEFAULT '',
+	-- The JID WhatsApp knows the chat by (maybe a LID), for app state patches.
+	wa_jid TEXT NOT NULL DEFAULT '',
+	-- Its place among the favorites, from 1; 0 when it isn't one. fav_id is
+	-- how WhatsApp's list names it.
+	favorite INTEGER NOT NULL DEFAULT 0,
+	fav_id TEXT NOT NULL DEFAULT '',
+	-- Marked as unread by hand.
+	marked INTEGER NOT NULL DEFAULT 0,
+	-- Cleared: listed without messages until one comes.
+	cleared INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS messages (
 	chat TEXT NOT NULL,
@@ -164,6 +185,8 @@ CREATE TABLE IF NOT EXISTS messages (
 	text TEXT NOT NULL,
 	quote TEXT NOT NULL DEFAULT '',
 	status INTEGER NOT NULL DEFAULT 0,
+	-- The sender as WhatsApp has it (maybe a LID), for message keys.
+	wa_sender TEXT NOT NULL DEFAULT '',
 	PRIMARY KEY (chat, id)
 );
 CREATE INDEX IF NOT EXISTS messages_chat_ts ON messages (chat, ts);
@@ -180,6 +203,10 @@ CREATE TABLE IF NOT EXISTS media (
 	wa_chat TEXT NOT NULL DEFAULT '',
 	wa_sender TEXT NOT NULL DEFAULT '',
 	PRIMARY KEY (chat, id)
+);
+CREATE TABLE IF NOT EXISTS meta (
+	k TEXT PRIMARY KEY,
+	v TEXT NOT NULL
 );
 `
 
@@ -216,13 +243,33 @@ func main() {
 	// Databases from before read_only existed.
 	db.Exec(`ALTER TABLE chats ADD COLUMN read_only TEXT NOT NULL DEFAULT ''`)
 	db.Exec(`UPDATE chats SET read_only = ? WHERE jid = ?`, officialOnly, types.PSAJID.String())
+	// And from before the chat menu.
+	for _, col := range []string{
+		`chats ADD COLUMN wa_jid TEXT NOT NULL DEFAULT ''`,
+		`chats ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0`,
+		`chats ADD COLUMN fav_id TEXT NOT NULL DEFAULT ''`,
+		`chats ADD COLUMN marked INTEGER NOT NULL DEFAULT 0`,
+		`chats ADD COLUMN cleared INTEGER NOT NULL DEFAULT 0`,
+		`messages ADD COLUMN wa_sender TEXT NOT NULL DEFAULT ''`,
+	} {
+		db.Exec(`ALTER TABLE ` + col)
+	}
 
-	b := &Bridge{cli: whatsmeow.NewClient(device, newLog("wa", "INFO")), db: db, ctx: ctx, dir: dir, avatars: make(chan avatarReq, 4096)}
+	b := &Bridge{cli: whatsmeow.NewClient(device, newLog("wa", "INFO")), db: db, dir: dir, avatars: make(chan avatarReq, 4096), actions: make(chan Cmd, 64)}
+	// whatsmeow's context logger, for the favorites' version (see favLog):
+	// each app state mutation logged at debug, zerolog's lowest by default.
+	b.ctx = zerolog.New(favLog{b}).Level(zerolog.DebugLevel).WithContext(ctx)
+	b.cli.BackgroundEventCtx = b.ctx
+	b.cli.AppStateDebugLogs = true
+	// Pins, archives, mutes and favorites also from the first full sync, not
+	// only from the changes after it.
+	b.cli.EmitAppStateEventsOnFullSync = true
 	b.cli.AddEventHandler(b.handle)
 	if b.cli.Store.ID == nil {
 		b.wipe()
 	}
 	go b.flushChats()
+	go b.chatActions()
 	for range 3 {
 		go b.fetchAvatars()
 	}
@@ -260,6 +307,8 @@ func (b *Bridge) pair() {
 			case "code":
 				emit(map[string]any{"t": "qr", "code": item.Code})
 			case "success":
+				// A new link syncs the app state in full, events and all.
+				b.setMeta("resynced", "1")
 				emit(map[string]any{"t": "paired"})
 				return
 			case "timeout":
@@ -293,7 +342,9 @@ func (b *Bridge) commands() {
 		case "send_file":
 			b.sendFile(c)
 		case "read":
-			go b.markRead(c.Chat, c.Quiet)
+			go b.markRead(c.Chat, c.Quiet, false)
+		case "chat_action":
+			b.actions <- c
 		case "search":
 			go b.search(c.Text)
 		case "profile":
@@ -325,6 +376,7 @@ func (b *Bridge) handle(raw any) {
 	case *events.Connected:
 		emit(map[string]any{"t": "ready", "me": b.cli.Store.ID.User, "name": b.cli.Store.PushName})
 		go b.syncGroups()
+		go b.resyncOnce()
 	case *events.LoggedOut:
 		_ = b.cli.Store.Delete(b.ctx)
 		b.wipe()
@@ -341,6 +393,7 @@ func (b *Bridge) handle(raw any) {
 				logf("recover: phone resent %s %s (request %s, media %v)", m.Chat, m.ID, e.UnavailableRequestID, m.Media != nil)
 			} else if news {
 				b.db.Exec(`UPDATE chats SET unread = unread + 1 WHERE jid = ?`, m.Chat)
+				b.unarchiveOnNews(m.Chat)
 			}
 			emit(map[string]any{"t": "message", "msg": m, "new": news})
 		}
@@ -364,6 +417,8 @@ func (b *Bridge) handle(raw any) {
 		}
 	case *events.PushName, *events.Contact:
 		b.dirty.Store(true)
+	default:
+		b.appStateEvent(raw)
 	}
 }
 
@@ -390,7 +445,7 @@ func (b *Bridge) me() types.JID {
 // downloads. For a logout, from here or from the phone, and for a start
 // without a session, so a new one never shows the last one's chats.
 func (b *Bridge) wipe() {
-	for _, t := range []string{"chats", "messages", "media"} {
+	for _, t := range []string{"chats", "messages", "media", "meta"} {
 		b.db.Exec("DELETE FROM " + t)
 	}
 	b.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -495,15 +550,17 @@ func (b *Bridge) message(e *events.Message, status int) *Msg {
 	}
 	var had int
 	m.fresh = b.db.QueryRow(`SELECT 1 FROM messages WHERE chat = ? AND id = ?`, m.Chat, m.ID).Scan(&had) != nil
-	_, err := b.db.Exec(`INSERT INTO messages (chat, id, sender, push_name, from_me, ts, text, quote, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	_, err := b.db.Exec(`INSERT INTO messages (chat, id, sender, push_name, from_me, ts, text, quote, status, wa_sender)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (chat, id) DO UPDATE SET text = excluded.text, status = max(status, excluded.status)`,
-		m.Chat, m.ID, m.Sender, e.Info.PushName, m.FromMe, m.TS, m.Text, m.Quote, m.Status)
+		m.Chat, m.ID, m.Sender, e.Info.PushName, m.FromMe, m.TS, m.Text, m.Quote, m.Status, e.Info.Sender.ToNonAD().String())
 	if err != nil {
 		return nil
 	}
-	b.db.Exec(`INSERT INTO chats (jid, last_ts) VALUES (?, ?)
-		ON CONFLICT (jid) DO UPDATE SET last_ts = max(last_ts, excluded.last_ts)`, m.Chat, m.TS)
+	// What WhatsApp calls the chat, unless its app state already said.
+	b.db.Exec(`INSERT INTO chats (jid, last_ts, wa_jid) VALUES (?, ?, ?)
+		ON CONFLICT (jid) DO UPDATE SET last_ts = max(last_ts, excluded.last_ts),
+			wa_jid = CASE WHEN wa_jid = '' THEN excluded.wa_jid ELSE wa_jid END`, m.Chat, m.TS, e.Info.Chat.ToNonAD().String())
 	if md, part := mediaOf(e.Message); md != nil {
 		b.storeMedia(m.Chat, m.ID, md, part, e.Info.Chat.String(), e.Info.Sender.String())
 		m.Media = md
@@ -597,9 +654,17 @@ func (b *Bridge) historySync(e *events.HistorySync) {
 			}
 			continue
 		}
+		// Forever comes as -1 (all bits set); milliseconds at times.
 		mute := int64(conv.GetMuteEndTime())
 		if mute > 1e12 {
 			mute /= 1000
+		}
+		if mute < 0 {
+			mute = muteForever
+		}
+		unread, marked := conv.GetUnreadCount(), conv.GetMarkedAsUnread()
+		if marked {
+			unread = max(unread, 1)
 		}
 		readOnly := ""
 		switch {
@@ -610,14 +675,15 @@ func (b *Bridge) historySync(e *events.HistorySync) {
 		case conv.GetReadOnly():
 			readOnly = cantSend
 		}
-		b.db.Exec(`INSERT INTO chats (jid, name, last_ts, unread, pinned, archived, mute_until, read_only) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		// pinned is when it was pinned.
+		b.db.Exec(`INSERT INTO chats (jid, name, last_ts, unread, pinned, archived, mute_until, read_only, wa_jid, marked) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (jid) DO UPDATE SET
 				name = CASE WHEN excluded.name != '' THEN excluded.name ELSE name END,
 				last_ts = max(last_ts, excluded.last_ts), unread = excluded.unread,
 				pinned = excluded.pinned, archived = excluded.archived, mute_until = excluded.mute_until,
-				read_only = excluded.read_only`,
-			chat.String(), conv.GetName(), int64(conv.GetConversationTimestamp()), conv.GetUnreadCount(),
-			conv.GetPinned() > 0, conv.GetArchived(), mute, readOnly)
+				read_only = excluded.read_only, wa_jid = excluded.wa_jid, marked = excluded.marked`,
+			chat.String(), conv.GetName(), int64(conv.GetConversationTimestamp()), unread,
+			int64(conv.GetPinned()), conv.GetArchived(), mute, readOnly, jid.ToNonAD().String(), marked)
 		for _, hm := range conv.GetMessages() {
 			web := hm.GetMessage()
 			evt, err := b.cli.ParseWebMessage(jid, web)
@@ -801,10 +867,12 @@ func (b *Bridge) flushChats() {
 // chats lists the conversations that have messages, as WhatsApp does: the
 // groups we're in and the contacts we know stay out until someone writes.
 func (b *Bridge) chats() []Chat {
-	rows, err := b.db.Query(`SELECT c.jid, c.name, c.last_ts, c.unread, c.pinned, c.archived, c.mute_until, c.read_only,
+	// Cleared ones stay, empty, as on the phone.
+	rows, err := b.db.Query(`SELECT c.jid, c.name, c.last_ts, c.unread, c.pinned, c.archived, c.mute_until, c.read_only, c.favorite,
 		COALESCE(m.text, ''), COALESCE(m.from_me, 0), COALESCE(m.status, 0)
-		FROM chats c JOIN messages m ON m.rowid = (
-			SELECT rowid FROM messages WHERE chat = c.jid ORDER BY ts DESC LIMIT 1)`)
+		FROM chats c LEFT JOIN messages m ON m.rowid = (
+			SELECT rowid FROM messages WHERE chat = c.jid ORDER BY ts DESC LIMIT 1)
+		WHERE m.rowid IS NOT NULL OR c.cleared > 0`)
 	if err != nil {
 		return nil
 	}
@@ -813,13 +881,15 @@ func (b *Bridge) chats() []Chat {
 	out := []Chat{}
 	for rows.Next() {
 		var c Chat
-		var mute int64
-		if rows.Scan(&c.JID, &c.Name, &c.LastTS, &c.Unread, &c.Pinned, &c.Archived, &mute, &c.ReadOnly, &c.Preview, &c.FromMe, &c.Status) != nil {
+		var mute, fav int64
+		if rows.Scan(&c.JID, &c.Name, &c.LastTS, &c.Unread, &c.PinTS, &c.Archived, &mute, &c.ReadOnly, &fav, &c.Preview, &c.FromMe, &c.Status) != nil {
 			continue
 		}
 		jid, _ := types.ParseJID(c.JID)
 		c.Group = jid.Server == types.GroupServer
-		c.Muted = mute > now
+		c.Muted = mute == muteForever || mute > now
+		c.Pinned = c.PinTS > 0
+		c.Favorite = fav > 0
 		if !c.Group {
 			if jid.User == b.me().User {
 				c.Name = "Você (mensagens para si)"
@@ -833,9 +903,10 @@ func (b *Bridge) chats() []Chat {
 		}
 		out = append(out, c)
 	}
+	// Pinned first, the last pinned on top, then by the newest message.
 	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].Pinned != out[j].Pinned {
-			return out[i].Pinned
+		if out[i].PinTS != out[j].PinTS {
+			return out[i].PinTS > out[j].PinTS
 		}
 		return out[i].LastTS > out[j].LastTS
 	})
@@ -944,17 +1015,26 @@ func (b *Bridge) send(chat, text string) {
 
 // markRead sends read receipts for the chat's unread messages (the last
 // `unread` received ones), grouped by sender as groups require. Quiet ones
-// reach only your other devices, so the sender sees no blue ticks.
-func (b *Bridge) markRead(chat string, quiet bool) {
+// reach only your other devices, so the sender sees no blue ticks. A chat
+// marked unread by hand (or `patch`, the menu's "Marcar como lida") also
+// tells the app state, or the phone keeps its mark.
+func (b *Bridge) markRead(chat string, quiet, patch bool) {
 	var unread int
-	if b.db.QueryRow(`SELECT unread FROM chats WHERE jid = ?`, chat).Scan(&unread) != nil || unread == 0 {
+	var marked bool
+	if b.db.QueryRow(`SELECT unread, marked FROM chats WHERE jid = ?`, chat).Scan(&unread, &marked) != nil || unread == 0 && !marked {
 		return
 	}
-	b.db.Exec(`UPDATE chats SET unread = 0 WHERE jid = ?`, chat)
+	b.db.Exec(`UPDATE chats SET unread = 0, marked = 0 WHERE jid = ?`, chat)
 	b.dirty.Store(true)
 	jid, err := types.ParseJID(chat)
 	if err != nil {
 		return
+	}
+	if marked || patch {
+		ts, key := b.lastKey(chat)
+		if err := b.cli.SendAppState(b.ctx, appstate.BuildMarkChatAsRead(b.waJID(chat), true, ts, key)); err != nil {
+			logf("mark read %s: %v", chat, err)
+		}
 	}
 	ms := b.query(`WHERE chat = ? AND from_me = 0 ORDER BY ts DESC LIMIT ?`, chat, min(unread, 50))
 	bySender := map[string][]types.MessageID{}

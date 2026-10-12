@@ -5,7 +5,8 @@
 use crate::app::{App, Phase};
 use crate::bridge::Profile;
 use crate::config::{self, Opt};
-use crate::ui::{avatar_cells, dim, draw_avatar, phone, truncate, wrap, GREEN, LINK_IN, TEXT};
+use crate::update::{Note, State};
+use crate::ui::{avatar_cells, dim, CAP_L, CAP_R, draw_avatar, phone, truncate, wrap, GREEN, LINK_IN, TEXT};
 use chrono::{Datelike, Days, Local, TimeZone};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Margin, Position, Rect};
@@ -35,6 +36,8 @@ enum Item {
     Notifications,
     Profile,
     Settings,
+    /// "Procurar atualizações"; with one installed, "Reinicie para atualizar".
+    CheckUpdate,
     About,
     Logout,
     // The notifications submenu.
@@ -45,7 +48,8 @@ enum Item {
     PauseWeek,
 }
 
-const MAIN: [Item; 7] = [Item::Notifications, Item::Sep, Item::Profile, Item::Settings, Item::Sep, Item::About, Item::Logout];
+const MAIN: [Item; 8] =
+    [Item::Notifications, Item::Sep, Item::Profile, Item::Settings, Item::Sep, Item::CheckUpdate, Item::About, Item::Logout];
 
 impl Item {
     fn in_sub(self) -> bool {
@@ -71,8 +75,14 @@ pub struct Account {
     pub profile: Option<Option<Profile>>,
     /// "Desconectar" went out: the logout that follows is ours, not the phone's.
     pub signing_out: bool,
+    /// A newer version, as the button by your name shows it (`update`).
+    pub update: Option<State>,
+    /// Asked to restart into the installed update: main execs it on the way out.
+    pub restart: bool,
     // Where the last draw put things, for the mouse.
     button: Rect,
+    /// The update button, inside `button`.
+    update_btn: Rect,
     menu_area: Rect,
     sub_area: Rect,
     rows: Vec<(Rect, Item)>,
@@ -182,6 +192,7 @@ impl App {
         // One popup at a time.
         self.attach.menu = None;
         self.emoji_panel.open = false;
+        self.chat_menu.popup = None;
         self.account.menu = Some(Popup { sel: Item::Notifications, sub: None, confirm: false });
     }
 
@@ -198,6 +209,7 @@ impl App {
             }
             Item::Profile => self.open_my_profile(),
             Item::Settings => self.account.settings = Some(0),
+            Item::CheckUpdate => self.check_updates(),
             Item::About => self.account.about = true,
             Item::Logout => {
                 if self.account.menu.as_ref().is_some_and(|p| p.confirm) {
@@ -232,6 +244,8 @@ impl App {
         self.msgs.clear();
         self.open = None;
         self.cursor = None;
+        self.archived = false;
+        self.chat_menu.popup = None;
         self.profile = None;
         self.avatars.clear();
         self.events.forget();
@@ -254,6 +268,77 @@ impl App {
         mine
     }
 
+    /// What the update thread or a check found, or how an install went.
+    pub(crate) fn on_update(&mut self, note: Note) {
+        let a = &mut self.account;
+        match note {
+            Note::Found { ver, assets } => a.update = Some(State::found(a.update.take(), ver, assets)),
+            Note::Installed(Ok(ver)) => {
+                a.update = Some(State::Installed(ver.clone()));
+                self.note(format!("atualizado para {ver} · clique em reiniciar ou Ctrl+O"));
+            }
+            Note::Checked(Ok(Some((ver, assets)))) => {
+                a.update = Some(State::found(a.update.take(), ver.clone(), assets));
+                self.note(format!("WhatsApp TUI {ver} disponível · clique no botão ao lado do seu nome"));
+            }
+            Note::Checked(Ok(None)) => self.note(format!("WhatsApp TUI está atualizado ({})", crate::update::current())),
+            Note::Checked(Err(e)) => self.note(format!("não procurou atualizações: {e}")),
+            Note::Installed(Err(e)) => {
+                if let Some(State::Installing { ver, assets }) = a.update.take() {
+                    a.update = Some(State::Available { ver, assets });
+                }
+                self.note(format!("não atualizou: {e}"));
+            }
+        }
+    }
+
+    /// Runs `job` off the UI thread and hands its note back as an `Ev::Update`.
+    fn update_job(&self, job: impl FnOnce() -> Note + Send + 'static) {
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::Ev::Update(job()));
+        });
+    }
+
+    /// Out of the app and into the installed version (main does the exec).
+    fn restart(&mut self) {
+        self.account.restart = true;
+        self.quit = true;
+    }
+
+    /// "Procurar atualizações": looks now; with one installed already, restarts.
+    fn check_updates(&mut self) {
+        if matches!(self.account.update, Some(State::Installed(_))) {
+            return self.restart();
+        }
+        if crate::update::check_disabled() {
+            return self.note("build de desenvolvimento: atualizações desligadas");
+        }
+        self.note("Procurando atualizações…");
+        self.update_job(crate::update::check_now);
+    }
+
+    /// The update button: install, or restart once installed.
+    fn update_click(&mut self) {
+        match self.account.update.take() {
+            Some(State::Available { ver, assets }) => {
+                if let Some(how) = crate::update::how() {
+                    self.account.update = Some(State::Available { ver, assets });
+                    self.note(how);
+                } else {
+                    self.note(format!("baixando WhatsApp TUI {ver}…"));
+                    self.account.update = Some(State::Installing { ver: ver.clone(), assets: assets.clone() });
+                    self.update_job(move || crate::update::install_now(ver, assets));
+                }
+            }
+            Some(State::Installed(ver)) => {
+                self.account.update = Some(State::Installed(ver));
+                self.restart();
+            }
+            other => self.account.update = other,
+        }
+    }
+
     /// Flips a switch; the dialog stays open. The tray follows in main's loop.
     fn choose_opt(&mut self, o: Opt) {
         if let Err(e) = self.settings.flip(o) {
@@ -265,6 +350,12 @@ impl App {
     /// closes the menu. True when taken.
     pub fn account_key(&mut self, k: KeyEvent) -> bool {
         let alt_s = k.modifiers.contains(KeyModifiers::ALT) && matches!(k.code, KeyCode::Char('s' | 'S'));
+        // Ctrl+O: into the installed update, from anywhere.
+        let ctrl_o = k.modifiers.contains(KeyModifiers::CONTROL) && matches!(k.code, KeyCode::Char('o' | 'O'));
+        if ctrl_o && matches!(self.account.update, Some(State::Installed(_))) {
+            self.restart();
+            return true;
+        }
         if !self.account.open() {
             if alt_s {
                 self.open_account_menu();
@@ -387,6 +478,11 @@ impl App {
             }
             return true;
         }
+        // Its own button inside the account's: never opens the menu.
+        if left && self.account.update_btn.contains(at) {
+            self.update_click();
+            return true;
+        }
         if left && self.account.button.contains(at) {
             self.open_account_menu();
             return true;
@@ -399,7 +495,7 @@ impl App {
 
 /// Your picture, name and the state under it.
 pub fn button(f: &mut Frame, app: &mut App, area: Rect) {
-    app.account.button = Rect::default();
+    (app.account.button, app.account.update_btn) = Default::default();
     let block = Block::new().borders(Borders::TOP).border_style(dim());
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -408,11 +504,35 @@ pub fn button(f: &mut Frame, app: &mut App, area: Rect) {
     }
     app.account.button = inner;
     let under = state(app);
-    head(f, app, inner, &under);
+    // A newer version: a small button at the right of the name's line.
+    let up = update_pill(app);
+    let up_w = up.as_ref().map_or(0, |l| l.width() as u16);
+    head(f, app, inner, &under, if up.is_some() { up_w + 1 } else { 0 });
+    if let Some(line) = up {
+        let r = Rect::new(inner.right().saturating_sub(up_w + 1).max(inner.x), inner.y, up_w, 1).intersection(inner);
+        f.render_widget(Paragraph::new(line), r);
+        app.account.update_btn = r;
+    }
 }
 
-/// The picture, then your name over `under`, from `area`'s top left.
-fn head(f: &mut Frame, app: &mut App, area: Rect, under: &str) {
+/// The update button: its words and colours by where the update stands.
+fn update_pill(app: &App) -> Option<Line<'static>> {
+    let (label, fg, bg) = match app.account.update.as_ref()? {
+        State::Available { ver, .. } => (format!("↑ {ver}"), Color::Black, GREEN),
+        // Faded while it works: there is nothing to click.
+        State::Installing { .. } => ("atualizando…".into(), Color::DarkGray, Color::Indexed(236)),
+        State::Installed(_) => ("↻ reiniciar".into(), Color::Black, GREEN),
+    };
+    Some(Line::from(vec![
+        Span::styled(CAP_L, Style::new().fg(bg)),
+        Span::styled(label, Style::new().fg(fg).bg(bg).bold()),
+        Span::styled(CAP_R, Style::new().fg(bg)),
+    ]))
+}
+
+/// The picture, then your name over `under`, from `area`'s top left;
+/// `room` cells kept free at the right of the name.
+fn head(f: &mut Frame, app: &mut App, area: Rect, under: &str, room: u16) {
     let mut x = area.x + 1;
     if let (Some((cols, rows)), Some(jid)) = (avatar_cells(app), app.my_jid()) {
         draw_avatar(f, app, &jid, false, Rect::new(x, area.y, cols, rows));
@@ -421,7 +541,7 @@ fn head(f: &mut Frame, app: &mut App, area: Rect, under: &str) {
     let w = area.right().saturating_sub(x + 1);
     let name_style = if app.account.menu.is_some() { Style::new().fg(GREEN).bold() } else { Style::new().fg(TEXT).bold() };
     let lines = vec![
-        Line::from(Span::styled(truncate(&my_name(app), w as usize), name_style)),
+        Line::from(Span::styled(truncate(&my_name(app), w.saturating_sub(room) as usize), name_style)),
         Line::from(Span::styled(truncate(under, w as usize), dim())),
     ];
     f.render_widget(Paragraph::new(lines), Rect::new(x, area.y, w, 2));
@@ -471,7 +591,7 @@ fn draw_menu(f: &mut Frame, app: &mut App) {
         return;
     }
     let under = state(app);
-    head(f, app, inner, &under);
+    head(f, app, inner, &under, 0);
 
     let iw = inner.width as usize;
     let mut sub_y = inner.y;
@@ -498,6 +618,8 @@ fn draw_menu(f: &mut Frame, app: &mut App) {
             }
             Item::Profile => padded("Perfil", "", iw),
             Item::Settings => padded("Configurações", "", iw),
+            Item::CheckUpdate if matches!(app.account.update, Some(State::Installed(_))) => padded("Reinicie para atualizar", "↻", iw),
+            Item::CheckUpdate => padded("Procurar atualizações", "", iw),
             Item::About => padded("Sobre o WhatsApp TUI", "", iw),
             Item::Logout if confirm => {
                 style = style.fg(Color::Yellow).bold();
@@ -650,7 +772,7 @@ fn draw_profile(f: &mut Frame, app: &mut App) {
     }
     // Your number where the button shows the connection.
     let number = app.my_jid().map(|j| phone(&j)).unwrap_or_default();
-    head(f, app, Rect::new(inner.x.saturating_sub(1), inner.y + 1, inner.width + 1, 2), &number);
+    head(f, app, Rect::new(inner.x.saturating_sub(1), inner.y + 1, inner.width + 1, 2), &number, 0);
     let mut lines = vec![Line::from(Span::styled("Recado", Style::new().fg(GREEN).bold()))];
     lines.extend(about.into_iter().map(|l| Line::from(format!(" {l}"))));
     lines.push(Line::default());

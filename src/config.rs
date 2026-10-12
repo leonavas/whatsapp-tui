@@ -51,6 +51,7 @@ pub const PHOTOS: Opt = Opt { key: "sidebar_avatars", label: "Mostrar fotos na l
 pub const RECEIPTS: Opt = Opt { key: "read_receipts", label: "Confirmações de leitura", default: true };
 pub const ENTER_SENDS: Opt = Opt { key: "enter_sends", label: "Enter envia a mensagem", default: true };
 pub const TRAY: Opt = Opt { key: "tray", label: "Mostrar o ícone na bandeja", default: true };
+pub const AUTO_UPDATE: Opt = Opt { key: "auto_update", label: "Procurar atualizações automaticamente", default: true };
 
 /// The settings dialog, top to bottom: a heading over each group's switches.
 /// A new setting is a const above and its place here.
@@ -59,7 +60,14 @@ pub const SECTIONS: &[(&str, &[Opt])] = &[
     ("Conversas", &[RECEIPTS]),
     ("Mensagens", &[ENTER_SENDS]),
     ("Bandeja do sistema", &[TRAY]),
+    ("Atualizações", &[AUTO_UPDATE]),
 ];
+
+/// Looking for new versions at start-up and every 6h (`update`); read fresh
+/// each time, so the settings switch counts without a restart.
+pub fn auto_update() -> bool {
+    value(AUTO_UPDATE.key).is_none_or(|v| v != "false")
+}
 
 /// Every switch, in the dialog's order.
 pub fn opts() -> Vec<Opt> {

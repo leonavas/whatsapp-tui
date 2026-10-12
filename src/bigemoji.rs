@@ -6,7 +6,7 @@ use crate::app::App;
 use image::{imageops, DynamicImage, RgbaImage};
 use ratatui::layout::Rect;
 use ratatui::Frame;
-use ratatui_image::{Image, Resize};
+use ratatui_image::Image;
 use rustybuzz::ttf_parser::{GlyphId, RasterImageFormat};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -107,7 +107,8 @@ pub fn draw(f: &mut Frame, app: &mut App, text: &str, rect: Rect) {
     if !app.protocols.contains_key(&key) {
         let s = picker.font_size();
         let Some(img) = picture(text, rect.width as u32 * s.width as u32, rect.height as u32 * s.height as u32) else { return };
-        let Ok(p) = picker.new_protocol(img, Rect::new(0, 0, rect.width, rect.height).into(), Resize::Fit(None)) else { return };
+        let fit = crate::ui::fit(&img);
+        let Ok(p) = picker.new_protocol(img, Rect::new(0, 0, rect.width, rect.height).into(), fit) else { return };
         app.protocols.insert(key.clone(), p);
     }
     f.render_widget(Image::new(&app.protocols[&key]), rect);

@@ -27,6 +27,7 @@ pub enum Phase {
 pub enum Filter {
     All,
     Unread,
+    Favorites,
     Groups,
 }
 
@@ -39,6 +40,10 @@ pub enum Avatar {
 /// A row of the sidebar: the chats, or while searching, what the search found.
 #[derive(Clone)]
 pub enum Item {
+    /// "Arquivadas" at the top of the list, into the archived chats.
+    Archived,
+    /// "← Arquivadas" over the archived chats, back out.
+    Back,
     Header(String),
     Info(String),
     Chat(Chat),
@@ -52,6 +57,8 @@ impl Item {
     pub fn key(&self) -> Option<String> {
         match self {
             Item::Header(_) | Item::Info(_) => None,
+            Item::Archived => Some("a:".into()),
+            Item::Back => Some("b:".into()),
             Item::Chat(c) => Some(format!("c:{}", c.jid)),
             Item::Contact(c) => Some(format!("p:{}", c.jid)),
             Item::Message(m) => Some(format!("m:{}:{}", m.chat, m.id)),
@@ -62,9 +69,16 @@ impl Item {
     pub fn height(&self) -> u16 {
         match self {
             Item::Header(_) | Item::Info(_) => 1,
+            // A line and a row of air.
+            Item::Archived | Item::Back => 2,
             // Two lines and a row of air, as WhatsApp Web spaces them.
             _ => 3,
         }
+    }
+
+    /// Where the cursor lands by itself: not on the rows that only lead in or out.
+    fn lands(&self) -> bool {
+        self.key().is_some() && !matches!(self, Item::Archived | Item::Back)
     }
 }
 
@@ -139,6 +153,10 @@ pub struct App {
     pub focus: Focus,
     pub search: String,
     pub filter: Filter,
+    /// The sidebar shows the archived chats.
+    pub archived: bool,
+    /// The chat menu (archive, pin, mute…).
+    pub chat_menu: crate::chatmenu::ChatMenu,
     pub found: Option<Found>,
     /// When to ask the bridge about the search text (after a pause in typing).
     search_due: Option<Instant>,
@@ -187,6 +205,8 @@ pub struct App {
     pub avatars: HashMap<String, Avatar>,
     /// Encoded for the terminal, per chat and size in cells.
     pub protocols: HashMap<(String, u16, u16), Protocol>,
+    /// A resize or the window coming back: the cell's pixels may have changed (zoom).
+    pub recheck_cell: bool,
     /// The `:` emoji autocomplete over the message box.
     pub emoji: crate::emoji::Popup,
     /// The emoji panel the smiley opens.
@@ -224,6 +244,8 @@ impl App {
             focus: Focus::Sidebar,
             search: String::new(),
             filter: Filter::All,
+            archived: false,
+            chat_menu: Default::default(),
             found: None,
             search_due: None,
             names: HashMap::new(),
@@ -257,6 +279,7 @@ impl App {
             picker,
             avatars: HashMap::new(),
             protocols: HashMap::new(),
+            recheck_cell: false,
             emoji: Default::default(),
             emoji_panel: crate::emoji_panel::Panel::load(),
             attach: Default::default(),
@@ -296,6 +319,19 @@ impl App {
         self.notice = Some((s.into(), Instant::now()));
     }
 
+    /// The terminal's cell size changed (zoom): a new picker for it, and
+    /// what was encoded for the old size is dropped, to be encoded again as
+    /// it's drawn.
+    pub fn set_font_size(&mut self, w: u16, h: u16) {
+        let Some(old) = self.picker.as_ref() else { return };
+        // No setter in ratatui-image: a new picker, same protocol.
+        #[allow(deprecated)]
+        let mut p = Picker::from_fontsize(ratatui_image::FontSize::new(w, h));
+        p.set_protocol_type(old.protocol_type());
+        self.picker = Some(p);
+        self.protocols.clear();
+    }
+
     pub fn tick(&mut self) {
         self.typing.retain(|_, (_, at)| at.elapsed() < Duration::from_secs(6));
         if self.notice.as_ref().is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(6)) {
@@ -328,16 +364,19 @@ impl App {
         self.chats.iter().find(|c| c.jid == jid)
     }
 
-    /// The chats the sidebar shows: the chip's and the search's matches,
-    /// archived ones last. The open chat stays while it's read.
+    /// The chats the sidebar shows: the chip's and the search's matches.
+    /// Archived ones only in their own list, or last in a search, as on
+    /// WhatsApp Web. The open chat stays while it's read.
     pub fn visible(&self) -> Vec<&Chat> {
         let words: Vec<String> = self.search.to_lowercase().split_whitespace().map(String::from).collect();
         let mut v: Vec<&Chat> = self
             .chats
             .iter()
+            .filter(|c| if self.archived { c.archived } else { !c.archived || !words.is_empty() })
             .filter(|c| match self.filter {
                 Filter::All => true,
                 Filter::Unread => c.unread > 0 || self.open.as_ref() == Some(&c.jid),
+                Filter::Favorites => c.favorite,
                 Filter::Groups => c.group,
             })
             .filter(|c| {
@@ -354,10 +393,20 @@ impl App {
     /// to start a chat with.
     pub fn items(&self) -> Vec<Item> {
         let chats = self.visible().into_iter().cloned().map(Item::Chat);
-        if self.search.trim().is_empty() {
-            return chats.collect();
-        }
         let mut v = Vec::new();
+        if self.archived {
+            v.push(Item::Back);
+        }
+        if self.search.trim().is_empty() {
+            if !self.archived && self.filter == Filter::All && self.chats.iter().any(|c| c.archived) {
+                v.push(Item::Archived);
+            }
+            v.extend(chats);
+            if self.archived && v.len() == 1 {
+                v.push(Item::Info("Nenhuma conversa arquivada".into()));
+            }
+            return v;
+        }
         let found = self.found.as_ref().filter(|f| f.query == self.search.trim());
         if let Some(n) = found.and_then(|f| f.number.clone()) {
             v.push(Item::Number(n));
@@ -377,7 +426,7 @@ impl App {
                     v.push(Item::Header("Mensagens".into()));
                     v.extend(f.messages.iter().cloned().map(Item::Message));
                 }
-                if v.is_empty() {
+                if v.iter().all(|i| matches!(i, Item::Back)) {
                     v.push(Item::Info("Nenhuma conversa, contato ou mensagem encontrada".into()));
                 }
             }
@@ -389,25 +438,26 @@ impl App {
     /// The cursor's row, or the first one it can be on.
     pub fn cursor_index(&self, items: &[Item]) -> usize {
         let at = self.cursor.as_ref().and_then(|k| items.iter().position(|i| i.key().as_ref() == Some(k)));
-        at.or_else(|| items.iter().position(|i| i.key().is_some())).unwrap_or(0)
+        at.or_else(|| items.iter().position(Item::lands)).or_else(|| items.iter().position(|i| i.key().is_some())).unwrap_or(0)
     }
 
     fn move_cursor(&mut self, delta: isize) {
         let items = self.items();
-        let keys: Vec<String> = items.iter().filter_map(Item::key).collect();
+        let keyed: Vec<&Item> = items.iter().filter(|i| i.key().is_some()).collect();
+        let keys: Vec<String> = keyed.iter().filter_map(|i| i.key()).collect();
         if keys.is_empty() {
             return;
         }
         // From nothing lit, the first step lands on the first chat.
         let i = match self.cursor.as_ref().and_then(|k| keys.iter().position(|x| x == k)) {
             Some(cur) => (cur as isize + delta).clamp(0, keys.len() as isize - 1) as usize,
-            None => 0,
+            None => keyed.iter().position(|i| i.lands()).unwrap_or(0),
         };
         self.cursor = Some(keys[i].clone());
         self.follow = true;
     }
 
-    fn current(&self) -> Option<Item> {
+    pub(crate) fn current(&self) -> Option<Item> {
         let items = self.items();
         let i = self.cursor_index(&items);
         items.into_iter().nth(i).filter(|i| i.key().is_some())
@@ -418,6 +468,8 @@ impl App {
     fn activate(&mut self, item: Item) {
         match item {
             Item::Header(_) | Item::Info(_) => return,
+            Item::Archived => return self.show_archived(true),
+            Item::Back => return self.show_archived(false),
             Item::Chat(c) => self.open_chat(c.jid),
             Item::Message(m) => {
                 self.jump = Some(m.id.clone());
@@ -436,6 +488,15 @@ impl App {
         self.search.clear();
         self.found = None;
         self.focus_input();
+    }
+
+    /// Into the archived chats, or back to the list (onto "Arquivadas").
+    fn show_archived(&mut self, on: bool) {
+        self.archived = on;
+        self.cursor_to_first();
+        if !on {
+            self.cursor = Some("a:".into());
+        }
     }
 
     fn open_chat(&mut self, jid: String) {
@@ -535,7 +596,12 @@ impl App {
         }
         match ev {
             Ev::Remote(cmd) => self.on_remote(cmd),
-            Ev::Term(TermEvent::FocusGained) => self.set_focused(true),
+            Ev::Update(note) => self.on_update(note),
+            Ev::Term(TermEvent::FocusGained) => {
+                self.recheck_cell = true;
+                self.set_focused(true)
+            }
+            Ev::Term(TermEvent::Resize(..)) => self.recheck_cell = true,
             Ev::Term(TermEvent::FocusLost) => self.set_focused(false),
             Ev::Bridge(e) => self.on_bridge(e),
             Ev::Attach(e) => self.on_attach(e),
@@ -629,6 +695,16 @@ impl App {
                             c.status = c.status.max(status);
                         }
                     }
+                }
+            }
+            Event::Cleared { chat, deleted } => {
+                if deleted && self.open.as_ref() == Some(&chat) {
+                    self.close_chat();
+                }
+                // Gone from the cache; open, what's left of it comes again.
+                self.msgs.remove(&chat);
+                if self.open.as_ref() == Some(&chat) {
+                    self.cmd(json!({"c": "history", "chat": chat, "limit": 400}));
                 }
             }
             Event::Read { chat } => {
@@ -731,8 +807,10 @@ impl App {
                     last_ts: m.ts,
                     unread: u32::from(new && !seen),
                     pinned: false,
+                    pin_ts: 0,
                     archived: false,
                     muted: false,
+                    favorite: false,
                     preview: m.text.clone(),
                     from_me: m.from_me,
                     status: m.status,
@@ -740,7 +818,8 @@ impl App {
                 });
             }
         }
-        self.chats.sort_by(|a, b| b.pinned.cmp(&a.pinned).then(b.last_ts.cmp(&a.last_ts)));
+        // As the bridge sorts them: pinned, the last pinned first, then by the newest message.
+        self.chats.sort_by(|a, b| b.pin_ts.cmp(&a.pin_ts).then(b.last_ts.cmp(&a.last_ts)));
         if seen && new && !existed {
             if let Some(c) = self.chats.iter_mut().find(|c| c.jid == m.chat) {
                 c.unread = 0;
@@ -789,7 +868,7 @@ impl App {
             return;
         }
         // The account menu's and dialogs' first: they cover everything.
-        if self.account_key(k) {
+        if self.account_key(k) || self.chat_menu_key(k) {
             return;
         }
         // The emoji panel's and popup's keys come first, their Esc before the info panel's.
@@ -835,12 +914,17 @@ impl App {
             KeyCode::Char('/') => self.focus = Focus::Search,
             KeyCode::Char('1') => self.set_filter(Filter::All),
             KeyCode::Char('2') => self.set_filter(Filter::Unread),
-            KeyCode::Char('3') => self.set_filter(Filter::Groups),
+            KeyCode::Char('3') => self.set_filter(Filter::Favorites),
+            KeyCode::Char('4') => self.set_filter(Filter::Groups),
+            KeyCode::Char('m') => self.chat_menu_here(),
+            KeyCode::Left | KeyCode::Char('h') if self.archived => self.show_archived(false),
             KeyCode::Tab if self.open.is_some() => self.focus_input(),
             // Ctrl+I is Tab to the terminal; `i` here instead.
             KeyCode::Char('i') => self.toggle_profile(),
             KeyCode::Char(',') => self.open_account_menu(),
             KeyCode::Char(' ') => self.play_last(),
+            // Out of the archived chats once nothing's searched.
+            KeyCode::Esc if self.archived && self.search.is_empty() => self.show_archived(false),
             KeyCode::Esc => {
                 self.search.clear();
                 self.found = None;
@@ -1008,7 +1092,7 @@ impl App {
     }
 
     fn mouse(&mut self, m: MouseEvent) {
-        if self.account_mouse(m) || self.emoji_panel_mouse(m) || self.emoji_click(m) || self.attach_mouse(m) {
+        if self.chat_menu_mouse(m) || self.account_mouse(m) || self.emoji_panel_mouse(m) || self.emoji_click(m) || self.attach_mouse(m) {
             return;
         }
         let at = Position::new(m.column, m.row);

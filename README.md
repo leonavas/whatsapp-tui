@@ -36,8 +36,9 @@ architecture (built on Ubuntu 24.04, so glibc 2.39 or newer), checks its
 SHA-256 and puts `whatsapp-tui` in `~/.local/bin`, without sudo, plus its
 desktop entry and icon in `~/.local/share`, so it shows in your app launcher.
 It warns when that folder is not on your `PATH`. `WHATSAPP_TUI_INSTALL_DIR`
-changes the folder and `WHATSAPP_TUI_VERSION=v0.1.0` picks a version. Run it
-again to update.
+changes the folder and `WHATSAPP_TUI_VERSION=v0.1.0` picks a version.
+Installed this way, whatsapp-tui updates itself (see [Auto-update](#auto-update));
+running the script again also updates it.
 
 ### From source
 
@@ -75,7 +76,9 @@ The first start shows a QR code: scan it in WhatsApp on your phone, under
 | `Enter` / `→` / `l` | open the chat |
 | `Ctrl+N` / `Ctrl+P` | open the next or previous chat |
 | `/` | search chats, contacts, messages and phone numbers |
-| `1` `2` `3` | all chats, unread, groups |
+| `1` `2` `3` `4` | all chats, unread, favorites, groups |
+| `m` | the chat's menu: archive, pin, mark read or unread, mute, favorite, clear, delete |
+| `Esc` / `←` | out of the archived chats |
 | `Tab` | between the chat list and the message box |
 | `i` | the contact's or group's details |
 | `Space` | play or pause the open chat's last audio |
@@ -90,7 +93,21 @@ The first start shows a QR code: scan it in WhatsApp on your phone, under
 | `q`, `Ctrl+C` | quit |
 
 The mouse works too: click chats, links, audio players, the clip and the
-smiley in the message box, and your name at the foot of the chat list.
+smiley in the message box, and your name at the foot of the chat list;
+right-click a chat (or click the chevron by its time) for its menu.
+
+## Chats
+
+As on WhatsApp Web, pinned chats come first (the last pinned on top, three at
+most), and a chat's row shows when it's muted or pinned. Archived chats leave
+the list for **Arquivadas** at its top, with how many of them are unread; new
+messages keep them there unless the phone is set to unarchive them. The chat
+menu archives, pins, marks read or unread, mutes (8 hours, a week or always),
+adds to Favorites (the **Favoritas** chip), clears and deletes, and the
+change goes to WhatsApp, so your phone and other devices follow; changes made
+there show here too. A favorite added here reaches the phone once WhatsApp
+has sent this device its favorites (that is, once you have at least one
+favorite set on the phone); until then it's kept here only.
 
 ## Events and scripting
 
@@ -103,9 +120,9 @@ commands such as `whatsapp-tui open <chat>` and `whatsapp-tui pause 1h`. See
 
 It shows a tray icon (StatusNotifierItem) with a dot while chats wait. The
 settings (your name › Configurações) turn it off, and with it the sidebar's
-photos, read receipts and whether Enter sends; they're kept as `key = value`
-lines in `~/.config/whatsapp-tui/config` (`tray`, `sidebar_avatars`,
-`read_receipts`, `enter_sends`).
+photos, read receipts, whether Enter sends and the update check; they're kept
+as `key = value` lines in `~/.config/whatsapp-tui/config` (`tray`,
+`sidebar_avatars`, `read_receipts`, `enter_sends`, `auto_update`).
 
 ## Omarchy plugin
 
@@ -136,6 +153,37 @@ Update it with `omarchy plugin update leonavas.whatsapp-tui`, then
 `omarchy restart shell`. With the plugin in the bar, turn whatsapp-tui's own
 tray icon off in Settings (your name › Configurações), or with `tray = false`
 in the config. Remove it with `omarchy plugin remove leonavas.whatsapp-tui`.
+
+## Auto-update
+
+Every time it starts, and every 6 hours while open, whatsapp-tui asks GitHub
+for the latest release in the background (errors are ignored). When there is
+a newer one, a small green "↑ X.Y.Z" button shows at the right of your name in
+the account button, at the bottom of the sidebar. Nothing is downloaded until
+you click it:
+
+- If whatsapp-tui was installed from a release into a folder you can write to
+  (like `~/.local/bin`, where install.sh puts it), the click downloads the
+  archive for your architecture, checks its SHA-256 and replaces
+  `whatsapp-tui` in place (and the desktop entry and icons, if install.sh put
+  them in `~/.local/share`). The button reads "atualizando…" meanwhile, then
+  "↻ reiniciar": click it (or press `Ctrl+O`) to restart into the new version
+  in the same terminal; the WhatsApp helper stops and the new one starts with
+  its own. On failure the button comes back and the error shows in the status
+  line.
+- If the binary belongs to something else (`~/.cargo/bin`, `/usr`, `/opt`,
+  `/nix`) or the folder is read-only, the click only tells in the status line
+  how to update (for cargo, the `cargo install` command above).
+
+Development builds (`target/`) never check, unless `WHATSAPP_TUI_UPDATE_DEV=1`
+is set: then the button shows (with a made-up version when there is no
+release) and a click only says it is a development build.
+
+`whatsapp-tui update` checks and installs right away, printing what it does,
+and "Procurar atualizações" in the account menu checks right away from the app
+(also with `auto_update = false`). Turn the automatic check off in Settings
+(your name › Configurações › Atualizações), or with `auto_update = false` in
+the config.
 
 ## License
 

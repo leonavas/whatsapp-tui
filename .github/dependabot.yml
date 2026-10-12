@@ -1,0 +1,12 @@
+# WhatsApp changes its protocol now and then, and whatsmeow follows within
+# days: an old one gets this device disconnected. A weekly pull request
+# keeps it (and the Go modules around it) current; a tag after merging ships it.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /bridge
+    schedule:
+      interval: weekly
+    groups:
+      go:
+        patterns: ["*"]

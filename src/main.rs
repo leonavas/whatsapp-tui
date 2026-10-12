@@ -10,6 +10,7 @@ mod avatar;
 mod bigemoji;
 mod account;
 mod bridge;
+mod chatmenu;
 mod cli;
 mod config;
 mod drafts;
@@ -23,6 +24,7 @@ mod player;
 mod ticks;
 mod tray;
 mod ui;
+mod update;
 
 use crossterm::event::{
     self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste, EnableFocusChange, EnableMouseCapture,
@@ -30,7 +32,7 @@ use crossterm::event::{
 };
 use std::io::IsTerminal;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub enum Ev {
     Term(event::Event),
@@ -41,6 +43,14 @@ pub enum Ev {
     Player(player::Ev),
     /// A command from another process: the CLI, the bar widget, the tray.
     Remote(ipc::Cmd),
+    /// A newer release, or how a check or an install went (`update`).
+    Update(update::Note),
+}
+
+/// One cell's size in pixels, from the tty (TIOCGWINSZ), when it reports pixels.
+fn cell_px() -> Option<(u16, u16)> {
+    let s = crossterm::terminal::window_size().ok()?;
+    (s.columns > 0 && s.rows > 0 && s.width > 0 && s.height > 0).then(|| (s.width / s.columns, s.height / s.rows))
 }
 
 fn main() {
@@ -93,6 +103,7 @@ fn main() {
     if let Some(s) = server {
         s.serve(tx.clone());
     }
+    update::background(tx.clone());
     if let Some(cmd) = start {
         let _ = tx.send(Ev::Remote(cmd));
     }
@@ -121,7 +132,19 @@ fn main() {
         }
     });
 
+    // Zooming the terminal changes the cell's pixels, not always the columns
+    // (so no resize comes): measured on resize, on focus and every second.
+    let (mut cell, mut cell_at) = (cell_px(), Instant::now());
     while !app.quit {
+        if std::mem::take(&mut app.recheck_cell) || cell_at.elapsed() >= Duration::from_secs(1) {
+            cell_at = Instant::now();
+            let now = cell_px();
+            if let Some((w, h)) = now.filter(|_| now != cell) {
+                cell = now;
+                app.set_font_size(w, h);
+                let _ = term.clear();
+            }
+        }
         app.publish();
         // Dropping it takes it off the bar.
         if (owner && app.settings.on(config::TRAY)) != tray.is_some() {
@@ -150,4 +173,12 @@ fn main() {
     app.save_drafts();
     ratatui::restore();
     app.unpublish();
+    // Into the installed update: dropping the app stops the bridge; the lock
+    // and the socket close with this process image (close-on-exec) and the
+    // new one claims them again, in this same terminal.
+    if app.account.restart {
+        drop(app);
+        drop(term);
+        eprintln!("whatsapp-tui: não reiniciou: {}", update::restart());
+    }
 }

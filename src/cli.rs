@@ -25,6 +25,7 @@ usage:
   whatsapp-tui                  open whatsapp-tui, or bring the open one to the front
   whatsapp-tui --new-instance   open another one alongside the running one
   whatsapp-tui --version        show the version
+  whatsapp-tui update           install the latest release over this one
 
 talking to the running whatsapp-tui (see docs/events.md):
   whatsapp-tui open <chat> [message-id] [--background]
@@ -56,6 +57,7 @@ pub fn run(args: &[String]) -> Option<Next> {
         "resume" => Next::Exit(pause(None)),
         "status" => Next::Exit(status(rest.iter().any(|a| a == "--json"))),
         "events" => Next::Exit(ipc::follow()),
+        "update" => Next::Exit(crate::update::cli()),
         _ => return None,
     })
 }
