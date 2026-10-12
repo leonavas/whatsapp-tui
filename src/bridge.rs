@@ -137,13 +137,18 @@ pub enum Event {
     Qr { code: String },
     Paired,
     /// `name` is your WhatsApp name, as last saved.
+    /// `me` is your number, the user part of your JID.
     Connecting {
         #[serde(default)]
         name: String,
+        #[serde(default)]
+        me: String,
     },
     Ready {
         #[serde(default)]
         name: String,
+        #[serde(default)]
+        me: String,
     },
     LoggedOut,
     Sync { progress: u32 },
@@ -208,15 +213,6 @@ pub fn cache_dir() -> PathBuf {
 /// The hooks, and `config` with the few settings there are.
 pub fn config_dir() -> PathBuf {
     xdg("XDG_CONFIG_HOME", ".config").join(NAME)
-}
-
-/// A `key = value` line of `~/.config/whatsapp-tui/config`.
-pub fn setting(key: &str) -> Option<String> {
-    let text = std::fs::read_to_string(config_dir().join("config")).ok()?;
-    text.lines().find_map(|line| {
-        let (k, v) = line.split_once('=')?;
-        (k.trim() == key).then(|| v.trim().trim_matches('"').to_string()).filter(|v| !v.is_empty())
-    })
 }
 
 /// The app was called zap: its folders move to the new names, the paired

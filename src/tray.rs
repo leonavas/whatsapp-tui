@@ -49,9 +49,9 @@ struct Item {
 impl Item {
     fn label(&self) -> String {
         match self.unread {
-            0 => "WhatsApp".into(),
-            1 => "WhatsApp · 1 conversa não lida".into(),
-            n => format!("WhatsApp · {n} conversas não lidas"),
+            0 => "WhatsApp TUI".into(),
+            1 => "WhatsApp TUI · 1 conversa não lida".into(),
+            n => format!("WhatsApp TUI · {n} conversas não lidas"),
         }
     }
 }

@@ -18,13 +18,16 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 pub(crate) const GREEN: Color = Color::Rgb(0x25, 0xD3, 0x66);
 const BUBBLE_IN: Color = Color::Rgb(0x24, 0x26, 0x26);
 const BUBBLE_OUT: Color = Color::Rgb(0x14, 0x4D, 0x37);
+/// Monospace and code: a shade off each bubble, as on WhatsApp Web.
+const CODE_IN: Color = Color::Rgb(0x33, 0x36, 0x36);
+const CODE_OUT: Color = Color::Rgb(0x0E, 0x3A, 0x29);
 pub(crate) const TEXT: Color = Color::Rgb(0xFA, 0xFA, 0xFA);
 /// 60% white over each bubble.
 pub(crate) const META_IN: Color = Color::Rgb(0xA7, 0xA8, 0xA8);
 const META_OUT: Color = Color::Rgb(0xA1, 0xB8, 0xAF);
 const READ_BLUE: Color = Color::Rgb(0x53, 0xBD, 0xEB);
 /// Links: WhatsApp's blue on the grey bubbles, a light green on our own.
-const LINK_IN: Color = Color::Rgb(0x53, 0xBD, 0xEB);
+pub(crate) const LINK_IN: Color = Color::Rgb(0x53, 0xBD, 0xEB);
 const LINK_OUT: Color = Color::Rgb(0x7F, 0xD8, 0xA8);
 pub(crate) const DAY_PILL: Color = Color::Rgb(0x1D, 0x1F, 0x1F);
 pub(crate) const FIELD: Color = Color::Rgb(0x24, 0x26, 0x26);
@@ -60,7 +63,7 @@ const CLOSED: Color = Color::Rgb(0xF1, 0x5C, 0x6D);
 /// The info panel's narrowest beside the conversation, slick's profile's.
 const PANEL: u16 = 44;
 
-fn dim() -> Style {
+pub(crate) fn dim() -> Style {
     Style::new().fg(Color::DarkGray)
 }
 
@@ -227,13 +230,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     match &app.phase {
         Phase::Qr(code) => qr_view(f, code, area),
+        Phase::LoggedOut if app.account.signing_out => center(f, area, vec![Line::from("Aparelho desconectado. Gerando um QR novo…")]),
         Phase::LoggedOut => center(f, area, vec![Line::from("Sessão encerrada no celular. Gerando um QR novo…")]),
         Phase::Dead(why) => center(
             f,
             area,
             vec![Line::from(why.clone()).red(), Line::default(), Line::from("r reinicia · q sai").style(dim())],
         ),
-        _ => center(f, area, vec![Line::from(vec![Span::styled("whatsapp-tui", Style::new().fg(GREEN).bold()), Span::raw("  conectando ao WhatsApp…")])]),
+        _ => center(f, area, vec![Line::from(vec![Span::styled("WhatsApp TUI", Style::new().fg(GREEN).bold()), Span::raw("  conectando ao WhatsApp…")])]),
     }
 }
 
@@ -277,14 +281,14 @@ fn qr_view(f: &mut Frame, code: &str, area: Rect) {
 
 /// The avatar's size in cells, two rows tall and square in pixels; None
 /// without a picture-capable terminal.
-fn avatar_cells(app: &App) -> Option<(u16, u16)> {
+pub(crate) fn avatar_cells(app: &App) -> Option<(u16, u16)> {
     let p = app.picker.as_ref()?;
     let s = p.font_size();
     let cols = ((2.0 * s.height as f64 / s.width as f64).round() as u16).clamp(3, 6);
     Some((cols, 2))
 }
 
-fn draw_avatar(f: &mut Frame, app: &mut App, jid: &str, group: bool, rect: Rect) {
+pub(crate) fn draw_avatar(f: &mut Frame, app: &mut App, jid: &str, group: bool, rect: Rect) {
     let Some(picker) = app.picker.as_ref() else { return };
     let key = (jid.to_string(), rect.width, rect.height);
     if !app.protocols.contains_key(&key) {
@@ -313,7 +317,10 @@ fn main_view(f: &mut Frame, app: &mut App, area: Rect) {
     let [body, status] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
     let side_w = (body.width * 3 / 10).clamp(32, 48).min(body.width / 2);
     let [side, sep, conv] = Layout::horizontal([Constraint::Length(side_w), Constraint::Length(1), Constraint::Min(1)]).areas(body);
+    // Your account at the foot of the chat list, as in slick.
+    let [side, account] = Layout::vertical([Constraint::Min(1), Constraint::Length(crate::account::BUTTON_H)]).areas(side);
     sidebar(f, app, side);
+    crate::account::button(f, app, account);
     let bar: Vec<Line> = (0..sep.height).map(|_| Line::from("│").style(dim())).collect();
     f.render_widget(Paragraph::new(bar), sep);
     // The info panel takes the right, as slick's profile does, and the
@@ -344,6 +351,7 @@ fn main_view(f: &mut Frame, app: &mut App, area: Rect) {
     crate::emoji::draw(f, app);
     crate::emoji_panel::draw(f, app);
     crate::attach::draw_menu(f, app);
+    crate::account::draw(f, app);
     // Last, so only what's still a link on screen becomes one for the terminal.
     let is_link = |c: &ratatui::buffer::Cell| c.modifier.contains(Modifier::UNDERLINED) && (c.fg == LINK_IN || c.fg == LINK_OUT);
     for (r, url) in &app.msg_links {
@@ -360,11 +368,6 @@ fn panel_width(total: u16) -> Option<u16> {
 }
 
 fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
-    let state = match (&app.phase, app.sync) {
-        (Phase::Ready, Some(p)) => format!("sincronizando {p}%"),
-        (Phase::Ready, None) => String::new(),
-        _ => "conectando…".into(),
-    };
     // The search field, a pill across the column.
     let field_w = (area.width as usize).saturating_sub(4);
     let searching = app.focus == Focus::Search;
@@ -400,12 +403,6 @@ fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         chip_spans.push(Span::raw(" "));
         x += w + 1;
     }
-    // Connecting or syncing shows at the end of the chips, where there's room.
-    let used = (x - area.x) as usize;
-    if !state.is_empty() && used + state.width() + 1 <= area.width as usize {
-        chip_spans.push(Span::raw(" ".repeat(area.width as usize - used - state.width() - 1)));
-        chip_spans.push(Span::styled(state, dim()));
-    }
 
     // The search field on top, then a blank row before the chips.
     app.search_area = Rect::new(area.x + 1, area.y, field_w as u16, 1);
@@ -418,7 +415,7 @@ fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     let list = Rect { y: area.y + 4, height: area.height.saturating_sub(4), ..area };
     app.side_list = list;
     app.side_hits.clear();
-    let cells = avatar_cells(app);
+    let cells = avatar_cells(app).filter(|_| app.settings.on(crate::config::PHOTOS));
     let items = app.items();
     if items.is_empty() {
         let msg = if app.filter == Filter::All { "Nenhuma conversa ainda" } else { "Nada encontrado" };
@@ -442,7 +439,14 @@ fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
     // The highlight follows the keyboard: the cursor while choosing, the open
     // chat while writing.
-    let lit = if app.focus == Focus::Input { app.open.as_ref().map(|j| format!("c:{j}")) } else { items.get(cur).and_then(Item::key) };
+    // Nothing's lit on the start screen until the keys move, as on WhatsApp Web;
+    // a search lights its first result, the one Enter opens.
+    let idle = app.cursor.is_none() && app.open.is_none() && app.search.trim().is_empty();
+    let lit = if app.focus == Focus::Input || idle && app.focus == Focus::Sidebar {
+        app.open.as_ref().map(|j| format!("c:{j}"))
+    } else {
+        items.get(cur).and_then(Item::key)
+    };
     // A cell in from each side: the highlight's a rounded box, as on WhatsApp Web.
     let inner = Rect { x: list.x + 1, width: list.width.saturating_sub(2), ..list };
     let width = inner.width as usize;
@@ -529,7 +533,7 @@ fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// A chat named by its number reads like WhatsApp writes numbers.
-fn display_name(name: &str, jid: &str) -> String {
+pub(crate) fn display_name(name: &str, jid: &str) -> String {
     let digits = name.strip_prefix('+').is_some_and(|d| !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()));
     if digits {
         phone(jid)
@@ -681,7 +685,7 @@ fn chat_item(c: &Chat, width: usize, avatar: Option<u16>, lit: bool, typing: boo
             room = room.saturating_sub(t.width() + 1);
         }
         let style = if unread { Style::new().fg(TEXT) } else { Style::new().fg(META_IN) };
-        left.push(Span::styled(truncate(&c.preview.replace('\n', " "), room), style));
+        left.extend(crate::markup::line(&c.preview, room, style));
     }
     let used: usize = left.iter().map(|s| s.content.width()).sum();
     left.push(Span::raw(" ".repeat((width.saturating_sub(1)).saturating_sub(used + right_w))));
@@ -705,7 +709,7 @@ fn conversation(f: &mut Frame, app: &mut App, area: Rect) {
             f,
             area,
             vec![
-                Line::from("whatsapp-tui").fg(GREEN).bold(),
+                Line::from("WhatsApp TUI").fg(GREEN).bold(),
                 Line::default(),
                 Line::from("Escolha uma conversa à esquerda").style(dim()),
                 Line::from("↑↓ navega · Enter abre · / busca").style(dim()),
@@ -858,6 +862,19 @@ fn input_box(f: &mut Frame, app: &mut App, area: Rect) {
     let edge = if rounded { Style::new() } else { field };
     let padding = Line::from(vec![Span::styled(" ", edge), Span::styled(" ".repeat(box_w.saturating_sub(2)), field), Span::styled(" ", edge)]);
     let shown: Vec<&String> = rows.iter().skip(first).take(h).collect();
+    // The formatting shows as it's typed; each row's start in the text for
+    // that: a row ends at the width, or at a newline it takes.
+    let chars: Vec<char> = app.input.chars().collect();
+    let looks = crate::markup::scan(&chars);
+    let mut starts = Vec::with_capacity(rows.len());
+    let mut at = 0;
+    for r in &rows {
+        starts.push(at);
+        at += r.chars().count();
+        if chars.get(at) == Some(&'\n') {
+            at += 1;
+        }
+    }
     let n = shown.len();
     let mut lines = vec![Line::default(), padding.clone()];
     lines.extend((0..strip).map(|_| Line::from(Span::styled(" ".repeat(box_w), field))));
@@ -868,16 +885,16 @@ fn input_box(f: &mut Frame, app: &mut App, area: Rect) {
         } else {
             vec![Span::styled(" ".repeat(ICONS_W), field)]
         };
-        let (text, style) = if app.input.is_empty() && i == 0 {
+        let text = if app.input.is_empty() && i == 0 {
             let hint = if focused { "Digite uma mensagem" } else { "Digite uma mensagem (Tab)" };
-            (hint.to_string(), Style::new().fg(META_IN).bg(FIELD))
+            vec![Span::styled(hint, Style::new().fg(META_IN).bg(FIELD))]
         } else {
-            (row.clone(), field)
+            crate::markup::typed_row(row, starts[first + i], &looks, field, CODE_IN, META_IN)
         };
-        let pad = width.saturating_sub(text.width());
+        let pad = width.saturating_sub(row_width(&text));
         let mut spans = vec![Span::styled("   ", field)];
         spans.extend(icons);
-        spans.push(Span::styled(text, style));
+        spans.extend(text);
         spans.push(Span::styled(" ".repeat(pad + 3), field));
         lines.push(Line::from(spans));
     }
@@ -1114,11 +1131,11 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, cell: Option<(u32, u32
             rows.push(vec![Span::styled(truncate(&m.sender_name, inner), Style::new().fg(name_color).bg(bg).add_modifier(Modifier::BOLD))]);
         }
         if !m.quote.is_empty() {
-            let q = truncate(&m.quote.replace('\n', " "), inner.saturating_sub(2));
-            rows.push(vec![Span::styled("▎", Style::new().fg(GREEN).bg(bg)), Span::styled(q, meta.add_modifier(Modifier::ITALIC))]);
+            let mut q = vec![Span::styled("▎", Style::new().fg(GREEN).bg(bg))];
+            q.extend(crate::markup::line(&m.quote, inner.saturating_sub(2), meta.add_modifier(Modifier::ITALIC)));
+            rows.push(q);
         }
         // Links underlined in their color, on every row they wrap onto.
-        let found = crate::links::find(&m.text);
         let link = Style::new().fg(if m.from_me { LINK_OUT } else { LINK_IN }).bg(bg).add_modifier(Modifier::UNDERLINED);
         let mut pieces = Vec::new();
         // An audio is a player, not its text.
@@ -1134,28 +1151,12 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, cell: Option<(u32, u32
             rows.extend(r);
             2
         } else {
-            let text = wrap_indexed(&m.text, inner);
+            // WhatsApp's formatting, its markers hidden: the rows' widths are what's shown.
+            let looks = crate::markup::Looks { base: body, link, shade: if m.from_me { CODE_OUT } else { CODE_IN }, dim: meta_fg };
+            let (text, found) = crate::markup::rows(&m.text, inner, &looks);
+            pieces.extend(found.into_iter().map(|(r, c, w, url)| (rows.len() + r, c, w, url)));
             let n_text = text.len();
-            for (l, at) in text {
-                let chars: Vec<char> = l.chars().collect();
-                let owner = |k: usize| found.iter().position(|&(a, b, _)| (a..b).contains(&at[k]));
-                let (mut spans, mut col, mut k) = (Vec::new(), 0, 0);
-                while k < chars.len() {
-                    let who = owner(k);
-                    let mut piece = String::new();
-                    while k < chars.len() && owner(k) == who {
-                        piece.push(chars[k]);
-                        k += 1;
-                    }
-                    let w = piece.width();
-                    if let Some(j) = who {
-                        pieces.push((rows.len(), col, w, found[j].2.clone()));
-                    }
-                    spans.push(Span::styled(piece, if who.is_some() { link } else { body }));
-                    col += w;
-                }
-                rows.push(spans);
-            }
+            rows.extend(text);
             n_text
         };
 
@@ -1611,21 +1612,13 @@ fn opening(hours: &[Hours], tz: Option<i32>) -> Opening {
     Opening { open: false, always: false, next: String::new(), day }
 }
 
-/// Text wrapped to `width` after `lead`, its links and e-mails in green.
+/// Text wrapped to `width` after `lead`, with WhatsApp's formatting, its
+/// links and e-mails in green.
 fn paragraph(lines: &mut Vec<Line<'static>>, text: &str, width: usize, lead: &str) {
-    let link = |w: &str| {
-        let w = w.trim_end_matches([' ', '.', ',', ')']);
-        w.starts_with("http://") || w.starts_with("https://") || w.starts_with("www.") || (w.contains('@') && w.rsplit('@').next().is_some_and(|d| d.contains('.')))
-    };
-    for l in wrap(text, width) {
+    let looks = crate::markup::Looks { base: Style::new().fg(TEXT), link: Style::new().fg(GREEN), shade: CODE_IN, dim: META_IN };
+    for row in crate::markup::rows(text, width, &looks).0 {
         let mut spans = vec![Span::raw(lead.to_string())];
-        for word in l.split_inclusive(' ') {
-            let style = Style::new().fg(if link(word) { GREEN } else { TEXT });
-            match spans.last_mut().filter(|s| s.style == style) {
-                Some(s) => s.content = format!("{}{word}", s.content).into(),
-                None => spans.push(Span::styled(word.to_string(), style)),
-            }
-        }
+        spans.extend(row);
         lines.push(Line::from(spans));
     }
 }
@@ -1671,11 +1664,15 @@ fn status_bar(f: &mut Frame, app: &App, area: Rect) {
     if let Some((text, _)) = &app.notice {
         return f.render_widget(Paragraph::new(format!(" {text}")).red(), area);
     }
-    let hints = match app.focus {
-        Focus::Input if app.emoji_panel.open => " digite para buscar · ←↑↓→ escolhe · Enter insere · Tab categorias · Esc fecha",
-        Focus::Sidebar => " ↑↓ conversas · Enter abre · / busca ou número · 1 2 3 filtros · i dados · Espaço áudio · Tab mensagem · q sai",
-        Focus::Search => " digite para filtrar · ↑↓ escolhe · Enter abre · Esc limpa",
-        Focus::Input => " Enter envia · Alt+Enter quebra linha · Alt+E emojis · Alt+A anexa · Ctrl+V cola · PgUp/PgDn rola · Esc conversas · Ctrl+C sai",
+    let (send, newline) = if app.settings.on(crate::config::ENTER_SENDS) { ("Enter", "Alt+Enter") } else { ("Alt+Enter", "Enter") };
+    let hints: String = match app.focus {
+        _ if app.account.menu.is_some() || app.account.settings.is_some() => " ↑↓ move · Enter escolhe · Esc fecha".into(),
+        _ if app.account.about => " Enter abre o link · Esc fecha".into(),
+        _ if app.account.profile.is_some() => " Esc fecha".into(),
+        Focus::Input if app.emoji_panel.open => " digite para buscar · ←↑↓→ escolhe · Enter insere · Tab categorias · Esc fecha".into(),
+        Focus::Sidebar => " ↑↓ conversas · Enter abre · / busca ou número · 1 2 3 filtros · i dados · Espaço áudio · Tab mensagem · Alt+S menu · q sai".into(),
+        Focus::Search => " digite para filtrar · ↑↓ escolhe · Enter abre · Esc limpa".into(),
+        Focus::Input => format!(" {send} envia · {newline} quebra linha · Alt+E emojis · Alt+A anexa · Ctrl+B negrito · Ctrl+I itálico · Ctrl+V cola · PgUp/PgDn rola · Esc conversas · Alt+S menu · Ctrl+C sai"),
     };
     f.render_widget(Paragraph::new(hints).style(dim()), area);
 }
@@ -1715,7 +1712,7 @@ fn weekday(t: DateTime<Local>) -> &'static str {
 }
 
 /// `5511999990000@s.whatsapp.net` → `+55 11 99999-0000` (Brazilian numbers; others as they come).
-fn phone(jid: &str) -> String {
+pub(crate) fn phone(jid: &str) -> String {
     let user = jid.split('@').next().unwrap_or(jid);
     if !jid.ends_with("@s.whatsapp.net") {
         return String::new();
@@ -1730,12 +1727,12 @@ fn phone(jid: &str) -> String {
 }
 
 /// Greedy word wrap by display width; words longer than a line are split.
-fn wrap(text: &str, width: usize) -> Vec<String> {
+pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
     wrap_indexed(text, width).into_iter().map(|(l, _)| l).collect()
 }
 
 /// `wrap`, with where in `text` each char of a line came from, by char.
-fn wrap_indexed(text: &str, width: usize) -> Vec<(String, Vec<usize>)> {
+pub(crate) fn wrap_indexed(text: &str, width: usize) -> Vec<(String, Vec<usize>)> {
     let mut out = Vec::new();
     // The char at the start of each word.
     let mut i = 0;
@@ -1772,7 +1769,7 @@ fn wrap_indexed(text: &str, width: usize) -> Vec<(String, Vec<usize>)> {
     out
 }
 
-fn truncate(s: &str, width: usize) -> String {
+pub(crate) fn truncate(s: &str, width: usize) -> String {
     if s.width() <= width {
         return s.to_string();
     }

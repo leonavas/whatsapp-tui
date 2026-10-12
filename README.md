@@ -1,4 +1,4 @@
-# whatsapp-tui
+# WhatsApp TUI
 
 A lightweight WhatsApp client for the terminal. It links to your phone as
 another device (like WhatsApp Web) and shows your chats, groups, pictures,
@@ -48,12 +48,16 @@ opens it in a terminal with the window class `org.omarchy.whatsapp-tui`).
 | `Space` | play or pause the open chat's last audio |
 | `PgUp` `PgDn` | scroll the conversation |
 | `Enter` / `Shift+Enter` | send / new line |
+| `Ctrl+B` / `Ctrl+I` | bold / italic (`Alt+B` / `Alt+I` where the terminal keeps them) |
+| `Ctrl+Shift+X` `M` `C` | strikethrough, monospace, code (`Alt+X` `Alt+M` `Alt+C` too) |
+| `Ctrl+Shift+9` | make the line a quote, or not |
 | `:` | emoji by name |
 | `Ctrl+V` | paste a picture or files |
+| `Alt+S` / `,` | your account: pause notifications, profile, settings, disconnect |
 | `q`, `Ctrl+C` | quit |
 
 The mouse works too: click chats, links, audio players, the clip and the
-smiley in the message box.
+smiley in the message box, and your name at the foot of the chat list.
 
 ## Events and scripting
 
@@ -64,8 +68,11 @@ the front) and tells other programs what is unread: a snapshot in
 commands such as `whatsapp-tui open <chat>` and `whatsapp-tui pause 1h`. See
 [docs/events.md](docs/events.md).
 
-It shows a tray icon (StatusNotifierItem) with a dot while chats wait; put
-`tray = false` in `~/.config/whatsapp-tui/config` to turn it off.
+It shows a tray icon (StatusNotifierItem) with a dot while chats wait. The
+settings (your name › Configurações) turn it off, and with it the sidebar's
+photos, read receipts and whether Enter sends; they're kept as `key = value`
+lines in `~/.config/whatsapp-tui/config` (`tray`, `sidebar_avatars`,
+`read_receipts`, `enter_sends`).
 
 ## License
 

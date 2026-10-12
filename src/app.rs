@@ -201,6 +201,12 @@ pub struct App {
     pub focused: bool,
     /// Your WhatsApp name.
     pub me_name: String,
+    /// Your number, the user part of your JID; empty until the bridge says.
+    pub me: String,
+    /// The account button's menu and dialogs.
+    pub account: crate::account::Account,
+    /// The settings dialog's switches.
+    pub settings: crate::config::Settings,
     bridge: Option<Bridge>,
     pub(crate) tx: Sender<Ev>,
 }
@@ -258,6 +264,9 @@ impl App {
             events: crate::events::State::new(owner),
             focused: false,
             me_name: String::new(),
+            me: String::new(),
+            account: Default::default(),
+            settings: crate::config::Settings::load(),
             bridge: None,
             tx,
         };
@@ -389,8 +398,11 @@ impl App {
         if keys.is_empty() {
             return;
         }
-        let cur = self.cursor.as_ref().and_then(|k| keys.iter().position(|x| x == k)).unwrap_or(0);
-        let i = (cur as isize + delta).clamp(0, keys.len() as isize - 1) as usize;
+        // From nothing lit, the first step lands on the first chat.
+        let i = match self.cursor.as_ref().and_then(|k| keys.iter().position(|x| x == k)) {
+            Some(cur) => (cur as isize + delta).clamp(0, keys.len() as isize - 1) as usize,
+            None => 0,
+        };
         self.cursor = Some(keys[i].clone());
         self.follow = true;
     }
@@ -476,8 +488,14 @@ impl App {
     fn mark_read(&mut self, jid: &str) {
         if let Some(c) = self.chats.iter_mut().find(|c| c.jid == jid && c.unread > 0) {
             c.unread = 0;
-            self.cmd(json!({"c": "read", "chat": jid}));
+            self.send_read(jid);
         }
+    }
+
+    /// Read here; the sender hears of it only with read receipts on.
+    fn send_read(&mut self, jid: &str) {
+        let quiet = !self.settings.on(crate::config::RECEIPTS);
+        self.cmd(json!({"c": "read", "chat": jid, "quiet": quiet}));
     }
 
     /// A command from another process (`ipc`).
@@ -533,17 +551,24 @@ impl App {
 
     fn on_bridge(&mut self, e: Event) {
         match e {
-            Event::Qr { code } => self.phase = Phase::Qr(code),
+            Event::Qr { code } => {
+                self.account.signing_out = false;
+                self.phase = Phase::Qr(code);
+            }
             Event::Paired => self.phase = Phase::Connecting,
-            Event::Connecting { name } => {
+            Event::Connecting { name, me } => {
                 self.me_name = name;
+                self.me = me;
                 if self.phase == Phase::Starting {
                     self.phase = Phase::Connecting
                 }
             }
-            Event::Ready { name } => {
+            Event::Ready { name, me } => {
                 if !name.is_empty() {
                     self.me_name = name;
+                }
+                if !me.is_empty() {
+                    self.me = me;
                 }
                 self.phase = Phase::Ready
             }
@@ -552,6 +577,15 @@ impl App {
                 self.chats.clear();
                 self.msgs.clear();
                 self.open = None;
+                self.profile = None;
+                if let Some(j) = self.my_jid() {
+                    self.avatars.remove(&j);
+                }
+                (self.me, self.me_name) = Default::default();
+                // Only whether it was ours stays, for the screen that follows.
+                let ours = self.account.signing_out;
+                self.account = Default::default();
+                self.account.signing_out = ours;
             }
             Event::Exited => {
                 if self.phase == Phase::LoggedOut {
@@ -574,7 +608,7 @@ impl App {
                 if let Some(j) = self.open.clone().filter(|_| self.focused) {
                     if let Some(c) = self.chats.iter_mut().find(|c| c.jid == j && c.unread > 0) {
                         c.unread = 0;
-                        self.cmd(json!({"c": "read", "chat": j}));
+                        self.send_read(&j);
                     }
                 }
             }
@@ -619,6 +653,9 @@ impl App {
                 }
             }
             Event::Profile(p) => {
+                if self.on_my_profile(&p) {
+                    return;
+                }
                 if let Some(view) = self.profile.as_mut().filter(|v| v.chat == p.chat) {
                     view.photo = (!p.photo.is_empty()).then(|| image::open(&p.photo).ok()).flatten();
                     view.data = Some(p);
@@ -647,6 +684,8 @@ impl App {
                 if fatal {
                     self.phase = Phase::Dead(text);
                 } else {
+                    // A logout that didn't go through leaves you linked.
+                    self.account.signing_out = false;
                     self.note(text);
                 }
             }
@@ -710,7 +749,7 @@ impl App {
             if let Some(c) = self.chats.iter_mut().find(|c| c.jid == m.chat) {
                 c.unread = 0;
             }
-            self.cmd(json!({"c": "read", "chat": m.chat}));
+            self.send_read(&m.chat);
         }
     }
 
@@ -751,6 +790,10 @@ impl App {
                 KeyCode::Char('r') if matches!(self.phase, Phase::Dead(_)) => self.start(),
                 _ => {}
             }
+            return;
+        }
+        // The account menu's and dialogs' first: they cover everything.
+        if self.account_key(k) {
             return;
         }
         // The emoji panel's and popup's keys come first, their Esc before the info panel's.
@@ -800,6 +843,7 @@ impl App {
             KeyCode::Tab if self.open.is_some() => self.focus_input(),
             // Ctrl+I is Tab to the terminal; `i` here instead.
             KeyCode::Char('i') => self.toggle_profile(),
+            KeyCode::Char(',') => self.open_account_menu(),
             KeyCode::Char(' ') => self.play_last(),
             KeyCode::Esc => {
                 self.search.clear();
@@ -888,9 +932,11 @@ impl App {
 
     fn key_input(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        let newline = k.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
+        if self.format_key(k) {
+            return;
+        }
         match k.code {
-            KeyCode::Enter if newline => self.insert("\n"),
+            KeyCode::Enter if !self.sends(k) => self.newline(),
             KeyCode::Enter => self.send(),
             KeyCode::Esc | KeyCode::Tab => self.focus = Focus::Sidebar,
             KeyCode::Backspace if self.caret > 0 => {
@@ -923,6 +969,13 @@ impl App {
             KeyCode::Char(c) if !ctrl => self.insert(&c.to_string()),
             _ => {}
         }
+    }
+
+    /// Enter sends and Alt or Shift+Enter breaks the line, or the other way
+    /// round, as the settings have it.
+    pub(crate) fn sends(&self, k: KeyEvent) -> bool {
+        let modified = k.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
+        modified != self.settings.on(crate::config::ENTER_SENDS)
     }
 
     fn byte_at(&self, caret: usize) -> usize {
@@ -959,7 +1012,7 @@ impl App {
     }
 
     fn mouse(&mut self, m: MouseEvent) {
-        if self.emoji_panel_mouse(m) || self.emoji_click(m) || self.attach_mouse(m) {
+        if self.account_mouse(m) || self.emoji_panel_mouse(m) || self.emoji_click(m) || self.attach_mouse(m) {
             return;
         }
         let at = Position::new(m.column, m.row);

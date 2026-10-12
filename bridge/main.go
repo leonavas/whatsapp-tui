@@ -84,6 +84,8 @@ type Cmd struct {
 	Caption string `json:"caption"`
 	Kind    string `json:"kind"`
 	Temp    bool   `json:"temp"`
+	// read: without read receipts, only your other devices hear of it.
+	Quiet bool `json:"quiet"`
 }
 
 var (
@@ -222,7 +224,7 @@ func main() {
 	if b.cli.Store.ID == nil {
 		go b.pair()
 	} else {
-		emit(map[string]any{"t": "connecting", "name": b.cli.Store.PushName})
+		emit(map[string]any{"t": "connecting", "name": b.cli.Store.PushName, "me": b.cli.Store.ID.User})
 		if err := b.cli.Connect(); err != nil {
 			emit(map[string]any{"t": "error", "text": err.Error()})
 		}
@@ -284,7 +286,7 @@ func (b *Bridge) commands() {
 		case "send_file":
 			b.sendFile(c)
 		case "read":
-			go b.markRead(c.Chat)
+			go b.markRead(c.Chat, c.Quiet)
 		case "search":
 			go b.search(c.Text)
 		case "profile":
@@ -297,7 +299,12 @@ func (b *Bridge) commands() {
 		case "download":
 			go b.download(c.Chat, c.ID)
 		case "logout":
-			_ = b.cli.Logout(b.ctx)
+			// Unlinks this device on the phone too; offline, nothing changes.
+			if err := b.cli.Logout(b.ctx); err != nil {
+				emit(map[string]any{"t": "error", "text": "não desconectou: " + err.Error()})
+				continue
+			}
+			emit(map[string]any{"t": "logged_out"})
 			os.Exit(0)
 		}
 	}
@@ -895,8 +902,9 @@ func (b *Bridge) send(chat, text string) {
 }
 
 // markRead sends read receipts for the chat's unread messages (the last
-// `unread` received ones), grouped by sender as groups require.
-func (b *Bridge) markRead(chat string) {
+// `unread` received ones), grouped by sender as groups require. Quiet ones
+// reach only your other devices, so the sender sees no blue ticks.
+func (b *Bridge) markRead(chat string, quiet bool) {
 	var unread int
 	if b.db.QueryRow(`SELECT unread FROM chats WHERE jid = ?`, chat).Scan(&unread) != nil || unread == 0 {
 		return
@@ -917,7 +925,11 @@ func (b *Bridge) markRead(chat string) {
 		if jid.Server == types.GroupServer {
 			s, _ = types.ParseJID(sender)
 		}
-		if err := b.cli.MarkRead(b.ctx, ids, time.Now(), jid, s); err != nil {
+		kind := types.ReceiptTypeRead
+		if quiet {
+			kind = types.ReceiptTypeReadSelf
+		}
+		if err := b.cli.MarkRead(b.ctx, ids, time.Now(), jid, s, kind); err != nil {
 			fmt.Fprintln(os.Stderr, "mark read:", err)
 		}
 	}

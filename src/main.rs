@@ -8,14 +8,17 @@ mod app;
 mod attach;
 mod avatar;
 mod bigemoji;
+mod account;
 mod bridge;
 mod cli;
+mod config;
 mod drafts;
 mod emoji;
 mod emoji_panel;
 mod events;
 mod ipc;
 mod links;
+mod markup;
 mod player;
 mod ticks;
 mod tray;
@@ -23,6 +26,7 @@ mod ui;
 
 use crossterm::event::{
     self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste, EnableFocusChange, EnableMouseCapture,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use std::io::IsTerminal;
 use std::sync::mpsc;
@@ -92,8 +96,8 @@ fn main() {
     if let Some(cmd) = start {
         let _ = tx.send(Ev::Remote(cmd));
     }
-    // On unless `tray = false` in the config, and only in the first one.
-    let mut tray = (owner && bridge::setting("tray").is_none_or(|v| v != "false")).then(|| tray::Tray::start(tx.clone()));
+    // Only in the first one; the settings turn it on and off as it runs.
+    let (tray_tx, mut tray) = (tx.clone(), None::<tray::Tray>);
     let mut term = ratatui::init();
     // Asks the terminal what graphics it speaks, before anything else reads
     // input. Half blocks make a smudge of a photo: those go without.
@@ -104,6 +108,9 @@ fn main() {
     app.starting();
 
     let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste);
+    // So Ctrl+I (italic) comes apart from Tab, and Shift+Enter from Enter,
+    // where the terminal speaks kitty's protocol, as in slick.
+    let _ = crossterm::execute!(std::io::stdout(), PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
     // Whether the window has the keyboard: the open chat only counts as read then.
     let _ = crossterm::execute!(std::io::stdout(), EnableFocusChange);
     std::thread::spawn(move || {
@@ -116,6 +123,10 @@ fn main() {
 
     while !app.quit {
         app.publish();
+        // Dropping it takes it off the bar.
+        if (owner && app.settings.on(config::TRAY)) != tray.is_some() {
+            tray = tray.is_none().then(|| tray::Tray::start(tray_tx.clone()));
+        }
         if let Some(t) = &mut tray {
             // A pause dims it, like the widget.
             t.set(if app.paused() { 0 } else { app.attention() });
@@ -135,7 +146,7 @@ fn main() {
         app.tick();
     }
 
-    let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste, DisableFocusChange);
+    let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags, DisableMouseCapture, DisableBracketedPaste, DisableFocusChange);
     app.save_drafts();
     ratatui::restore();
     app.unpublish();

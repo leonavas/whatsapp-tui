@@ -173,64 +173,6 @@ pub fn escape(s: &str) -> String {
     out
 }
 
-/// WhatsApp's marks as HTML: ```mono```, *bold*, _italic_, ~strike~,
-/// everything else escaped.
-fn markup(text: &str) -> String {
-    let parts: Vec<&str> = text.split("```").collect();
-    let mut out = String::new();
-    for (i, part) in parts.iter().enumerate() {
-        if i % 2 == 1 && i + 1 < parts.len() {
-            out.push_str(&format!("<tt>{}</tt>", escape(part)));
-        } else {
-            // A ``` left without its pair stays as it was typed.
-            if i % 2 == 1 {
-                out.push_str("```");
-            }
-            out.push_str(&inline(part));
-        }
-    }
-    out
-}
-
-/// A mark opens after a non-word character and before a non-space, and
-/// closes after a non-space and before a non-word character, on one line.
-fn inline(s: &str) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    let mut out = String::new();
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        let tag = match c {
-            '*' => Some("b"),
-            '_' => Some("i"),
-            '~' => Some("s"),
-            _ => None,
-        };
-        let opens = tag.is_some()
-            && (i == 0 || !chars[i - 1].is_alphanumeric())
-            && chars.get(i + 1).is_some_and(|n| !n.is_whitespace() && *n != c);
-        let close = opens
-            .then(|| {
-                (i + 2..chars.len()).take_while(|&j| chars[j] != '\n').find(|&j| {
-                    chars[j] == c && !chars[j - 1].is_whitespace() && chars.get(j + 1).is_none_or(|n| !n.is_alphanumeric())
-                })
-            })
-            .flatten();
-        match (tag, close) {
-            (Some(t), Some(j)) => {
-                let inner: String = chars[i + 1..j].iter().collect();
-                out.push_str(&format!("<{t}>{}</{t}>", inline(&inner)));
-                i = j + 1;
-            }
-            _ => {
-                out.push_str(&escape(&c.to_string()));
-                i += 1;
-            }
-        }
-    }
-    out
-}
-
 fn cut(text: &str) -> String {
     if text.chars().count() > TEXT_MAX {
         text.chars().take(TEXT_MAX).collect::<String>() + "…"
@@ -241,7 +183,7 @@ fn cut(text: &str) -> String {
 
 fn message_json(m: &Msg) -> Value {
     let text = cut(m.text.trim());
-    json!({ "id": m.id, "ts": m.ts, "sender": m.sender, "author": m.sender_name, "text": text, "html": markup(&text) })
+    json!({ "id": m.id, "ts": m.ts, "sender": m.sender, "author": crate::ui::display_name(&m.sender_name, &m.sender), "text": text, "html": crate::markup::html(&text) })
 }
 
 /// The chat's profile picture as the bridge saved it, when it is there.
@@ -262,7 +204,8 @@ fn kind(jid: &str) -> &'static str {
 impl App {
     fn conv_json(&self, jid: &str) -> Value {
         let chat = self.chat(jid);
-        let name = self.name_of(jid).unwrap_or_else(|| jid.split('@').next().unwrap_or(jid).to_string());
+        // Numbers as WhatsApp writes them, "+55 11 90000-0000", like the list.
+        let name = self.name_of(jid).map_or_else(|| crate::ui::phone(jid), |n| crate::ui::display_name(&n, jid));
         json!({ "id": jid, "kind": kind(jid), "name": name, "muted": chat.is_some_and(|c| c.muted), "avatar": avatar(jid) })
     }
 

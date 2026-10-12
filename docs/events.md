@@ -95,7 +95,7 @@ it changes. Message text never touches the disk: `$XDG_RUNTIME_DIR` is a tmpfs.
   Escape it before showing it as HTML or markup (`notify-send` bodies, Qt rich
   text, a web page). `html` is the same text ready for that: escaped, with the
   message's own bold (`<b>`), italic (`<i>`), strikethrough (`<s>`) and
-  monospace (`<tt>`) as tags. Photos, voice notes, documents and the like are a
+  monospace and code (`<tt>`) as tags, quotes and bullets as `▎` and `•`. Photos, voice notes, documents and the like are a
   label with an emoji (`📷 Foto`, `🎤 Áudio 0:12`), with their caption when they
   have one. Both are cut at 500 characters.
 - `muted` is the chat muted in WhatsApp. Like WhatsApp, a muted chat still

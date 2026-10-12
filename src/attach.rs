@@ -287,7 +287,7 @@ impl App {
                 let key = self.attached().last().map(|a| a.key.clone()).unwrap_or_default();
                 self.forget(&key);
             }
-            KeyCode::Enter if !alt && !k.modifiers.contains(KeyModifiers::SHIFT) && !self.attached().is_empty() => self.send_files(),
+            KeyCode::Enter if self.sends(k) && !self.attached().is_empty() => self.send_files(),
             _ => return false,
         }
         true
