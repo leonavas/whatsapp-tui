@@ -8,6 +8,8 @@ The WhatsApp side is a small Go helper built on
 [whatsmeow](https://github.com/tulir/whatsmeow), carried inside the
 binary; the interface is Rust ([ratatui](https://ratatui.rs)).
 
+The interface is in Brazilian Portuguese for now.
+
 > **Unofficial.** whatsapp-tui is not affiliated with, endorsed by or
 > connected to WhatsApp or Meta. "WhatsApp" is a trademark of its owner, used
 > here only to say what this connects to. Use it at your own risk.
@@ -73,6 +75,13 @@ settings (your name › Configurações) turn it off, and with it the sidebar's
 photos, read receipts and whether Enter sends; they're kept as `key = value`
 lines in `~/.config/whatsapp-tui/config` (`tray`, `sidebar_avatars`,
 `read_receipts`, `enter_sends`).
+
+## Omarchy
+
+[omarchy-whatsapp-tui](https://github.com/leonavas/omarchy-whatsapp-tui) puts
+it in the Omarchy bar: an icon with unread badges, a preview of what's waiting
+on hover, desktop notifications, and a menu to launch it on login or pause
+notifications. It reads the snapshot and the event stream above.
 
 ## License
 
