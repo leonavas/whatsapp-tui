@@ -1,0 +1,65 @@
+# A tag v* builds whatsapp-tui for Linux and attaches
+# whatsapp-tui-<version>-<target>.tar.gz, with a .sha256, to that tag's
+# release. install.sh downloads exactly these names. Each archive holds the
+# binary (the Go helper inside it), the desktop entry and the icons.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Pinned (not -latest) so the glibc the binaries need doesn't move.
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag matches Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME, Cargo.toml $version"; exit 1; }
+
+      # The WhatsApp helper (bridge/) is Go with cgo (SQLite); build.rs builds it.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: bridge/go.mod
+          cache-dependency-path: bridge/go.sum
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          name="whatsapp-tui-${version}-${{ matrix.target }}.tar.gz"
+          mkdir pkg
+          cp target/release/whatsapp-tui assets/whatsapp-tui.desktop assets/whatsapp-tui.svg assets/whatsapp-tui-256.png pkg/
+          tar -czf "$name" -C pkg .
+          sha256sum "$name" > "$name.sha256"
+          echo "ASSET=$name" >> "$GITHUB_ENV"
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The jobs race to create the release; the losers just upload.
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes || true
+          gh release upload "$GITHUB_REF_NAME" "$ASSET" "$ASSET.sha256" --clobber

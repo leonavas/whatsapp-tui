@@ -14,27 +14,58 @@ The interface is in Brazilian Portuguese for now.
 > connected to WhatsApp or Meta. "WhatsApp" is a trademark of its owner, used
 > here only to say what this connects to. Use it at your own risk.
 
-## Building
+## Requirements
 
-You need:
-
-- Rust (stable) and Cargo
-- Go, with CGO and a C compiler (the helper uses SQLite through cgo). The
-  repository pins Go with [mise](https://mise.jdx.dev): `mise install`, and the
-  build finds it through `mise exec` when `go` isn't on your `PATH`.
-- At run time, optionally: `mpv` for voice notes and audio, `wl-paste` or
+- Linux (x86_64 or aarch64).
+- A terminal with an image protocol is recommended for pictures and avatars:
+  kitty, ghostty, WezTerm, foot or any sixel terminal. Others fall back to
+  half-block images.
+- A [Nerd Font](https://www.nerdfonts.com/) for the icons.
+- Optional, at run time: `mpv` for voice notes and audio, `wl-paste` or
   `xclip` to paste pictures, `zenity`, `yad` or `kdialog` to pick files.
+
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/leonavas/whatsapp-tui/master/install.sh | sh
+```
+
+The script ([install.sh](install.sh)) downloads the latest
+[release](https://github.com/leonavas/whatsapp-tui/releases) for your
+architecture (built on Ubuntu 24.04, so glibc 2.39 or newer), checks its
+SHA-256 and puts `whatsapp-tui` in `~/.local/bin`, without sudo, plus its
+desktop entry and icon in `~/.local/share`, so it shows in your app launcher.
+It warns when that folder is not on your `PATH`. `WHATSAPP_TUI_INSTALL_DIR`
+changes the folder and `WHATSAPP_TUI_VERSION=v0.1.0` picks a version. Run it
+again to update.
+
+### From source
+
+You need Rust (stable) and Go, with CGO and a C compiler (the helper uses
+SQLite through cgo). The repository pins Go with [mise](https://mise.jdx.dev):
+`mise install`, and the build finds it through `mise exec` when `go` isn't on
+your `PATH`.
+
+Then either:
+
+```sh
+cargo install --locked --git https://github.com/leonavas/whatsapp-tui
+```
+
+or, from a clone:
 
 ```sh
 cargo build --release
 ./target/release/whatsapp-tui
 ```
 
-The first start shows a QR code: scan it in WhatsApp on your phone, under
-**Linked devices**. The session is kept in `~/.local/share/whatsapp-tui/`.
-
 `assets/` has the icon and a desktop entry (`whatsapp-tui.desktop`, which
 opens it in a terminal with the window class `org.omarchy.whatsapp-tui`).
+
+## Link your phone
+
+The first start shows a QR code: scan it in WhatsApp on your phone, under
+**Linked devices**. The session is kept in `~/.local/share/whatsapp-tui/`.
 
 ## Keys
 
@@ -76,12 +107,35 @@ photos, read receipts and whether Enter sends; they're kept as `key = value`
 lines in `~/.config/whatsapp-tui/config` (`tray`, `sidebar_avatars`,
 `read_receipts`, `enter_sends`).
 
-## Omarchy
+## Omarchy plugin
 
-[omarchy-whatsapp-tui](https://github.com/leonavas/omarchy-whatsapp-tui) puts
-it in the Omarchy bar: an icon with unread badges, a preview of what's waiting
-on hover, desktop notifications, and a menu to launch it on login or pause
-notifications. It reads the snapshot and the event stream above.
+![WhatsApp in the Omarchy bar: badges, the hover preview and the menu](https://raw.githubusercontent.com/leonavas/omarchy-whatsapp-tui/master/preview.png)
+
+On [Omarchy](https://omarchy.org), the
+[WhatsApp TUI bar plugin](https://github.com/leonavas/omarchy-whatsapp-tui)
+(`leonavas.whatsapp-tui`) runs on whatsapp-tui and puts WhatsApp in the bar in
+place of the tray icon:
+
+- red and blue badges for unread direct chats and groups (muted chats stay
+  quiet);
+- a preview of the unread chats and their newest messages on hover, a click
+  jumps to the chat;
+- desktop notifications for new messages, with the contact's picture;
+- whatsapp-tui parked in the scratchpad (SUPER+S), a click shows or hides it;
+- a right-click menu: Launch on Login, Launch in Foreground, Open in
+  Scratchpad, pause notifications.
+
+Install whatsapp-tui first (above), then:
+
+```sh
+omarchy plugin add https://github.com/leonavas/omarchy-whatsapp-tui.git
+omarchy plugin enable leonavas.whatsapp-tui --section right
+```
+
+Update it with `omarchy plugin update leonavas.whatsapp-tui`, then
+`omarchy restart shell`. With the plugin in the bar, turn whatsapp-tui's own
+tray icon off in Settings (your name › Configurações), or with `tray = false`
+in the config. Remove it with `omarchy plugin remove leonavas.whatsapp-tui`.
 
 ## License
 
