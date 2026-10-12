@@ -1,0 +1,16 @@
+whatsapp-tui
+Copyright 2026 Rodrigo Leonavas
+
+This product is an unofficial WhatsApp client. It is not affiliated with,
+endorsed by or sponsored by WhatsApp LLC or Meta Platforms, Inc.
+"WhatsApp" and the WhatsApp logo are trademarks of WhatsApp LLC.
+
+The WhatsApp side is built on whatsmeow (https://github.com/tulir/whatsmeow),
+licensed under the Mozilla Public License 2.0.
+
+The icons in assets/ are drawn from the WhatsApp glyph published by
+Simple Icons (https://simpleicons.org), CC0 1.0.
+
+src/emoji_pt.txt is derived from the Unicode CLDR annotations
+(https://github.com/unicode-org/cldr), Copyright © 1991-2026 Unicode, Inc.,
+distributed under the Unicode License v3 (https://www.unicode.org/license.txt).

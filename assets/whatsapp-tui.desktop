@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=WhatsApp TUI
+GenericName=WhatsApp client
+Comment=Lightweight WhatsApp client for the terminal
+Exec=xdg-terminal-exec --app-id=org.omarchy.whatsapp-tui -e whatsapp-tui
+Icon=whatsapp-tui
+Terminal=false
+Categories=Network;InstantMessaging;
+Keywords=whatsapp;chat;
+StartupWMClass=org.omarchy.whatsapp-tui
