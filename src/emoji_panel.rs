@@ -112,6 +112,13 @@ fn recent_path() -> std::path::PathBuf {
 }
 
 impl Panel {
+    /// Signed out: the recents were the last account's.
+    pub fn forget_recent(&mut self) {
+        self.recent.clear();
+        self.shown_recent.clear();
+        let _ = std::fs::remove_file(recent_path());
+    }
+
     pub fn load() -> Panel {
         let saved: Vec<String> = std::fs::read_to_string(recent_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let recent = saved.iter().filter_map(|s| emojis::get(s)).map(Emoji::as_str).take(MAX_RECENT).collect();

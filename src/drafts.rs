@@ -37,6 +37,12 @@ struct SavedFile {
     temp: bool,
 }
 
+impl Drafts {
+    pub fn mark_restored(&mut self) {
+        self.restored = true;
+    }
+}
+
 fn file() -> PathBuf {
     crate::bridge::data_dir().join("drafts.json")
 }
@@ -143,6 +149,20 @@ impl App {
             }
             let _ = tx.send(crate::Ev::Attach(Ev::Restored { texts, files }));
         });
+    }
+
+    /// Forgets every draft, the box's too, and their files.
+    pub fn clear_drafts(&mut self) {
+        self.drafts.texts.clear();
+        self.attach.files.clear();
+        self.input.clear();
+        self.caret = 0;
+        self.save_drafts();
+        if let Ok(dir) = std::fs::read_dir(crate::attach::paste_dir()) {
+            for e in dir.flatten() {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
     }
 
     /// The last run's texts, under what's been typed since.

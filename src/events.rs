@@ -44,6 +44,12 @@ impl State {
     pub fn new(on: bool) -> State {
         State { on, started: chrono::Local::now().timestamp(), paused: load_pause(), ..Default::default() }
     }
+
+    /// Signed out: the previews were the last account's.
+    pub fn forget(&mut self) {
+        self.previews.clear();
+        self.fetching.clear();
+    }
 }
 
 // ---- the pause -------------------------------------------------------------
@@ -258,7 +264,9 @@ impl App {
     /// Writes the snapshot when something in it changed, and tells the
     /// subscribers what: counts, chats read, a pause.
     pub fn publish(&mut self) {
-        if !self.events.on || !self.events.chats_loaded || matches!(self.phase, Phase::Qr(_) | Phase::LoggedOut | Phase::Dead(_)) {
+        // Signed out, the chats are gone: an empty snapshot clears the bar's badges.
+        let signed_out = matches!(self.phase, Phase::Qr(_) | Phase::LoggedOut);
+        if !self.events.on || !self.events.chats_loaded && !signed_out || matches!(self.phase, Phase::Dead(_)) {
             return;
         }
         if self.events.paused.is_some_and(|t| t <= chrono::Local::now().timestamp()) {

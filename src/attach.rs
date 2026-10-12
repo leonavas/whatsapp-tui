@@ -348,6 +348,12 @@ impl App {
                 }
             }
             Ev::Restored { texts, files } => {
+                // Signed out meanwhile: they were the last account's.
+                if matches!(self.phase, crate::app::Phase::Qr(_) | crate::app::Phase::LoggedOut) {
+                    self.drafts.mark_restored();
+                    self.save_drafts();
+                    return;
+                }
                 for (chat, v) in files {
                     self.add_files(chat, v);
                 }

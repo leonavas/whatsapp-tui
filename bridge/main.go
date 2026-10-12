@@ -215,6 +215,9 @@ func main() {
 
 	b := &Bridge{cli: whatsmeow.NewClient(device, newLog("wa", "INFO")), db: db, ctx: ctx, dir: dir, avatars: make(chan avatarReq, 4096)}
 	b.cli.AddEventHandler(b.handle)
+	if b.cli.Store.ID == nil {
+		b.wipe()
+	}
 	go b.flushChats()
 	for range 3 {
 		go b.fetchAvatars()
@@ -304,6 +307,7 @@ func (b *Bridge) commands() {
 				emit(map[string]any{"t": "error", "text": "não desconectou: " + err.Error()})
 				continue
 			}
+			b.wipe()
 			emit(map[string]any{"t": "logged_out"})
 			os.Exit(0)
 		}
@@ -318,8 +322,9 @@ func (b *Bridge) handle(raw any) {
 		emit(map[string]any{"t": "ready", "me": b.cli.Store.ID.User, "name": b.cli.Store.PushName})
 		go b.syncGroups()
 	case *events.LoggedOut:
-		emit(map[string]any{"t": "logged_out"})
 		_ = b.cli.Store.Delete(b.ctx)
+		b.wipe()
+		emit(map[string]any{"t": "logged_out"})
 		os.Exit(0)
 	case *events.HistorySync:
 		b.historySync(e)
@@ -375,6 +380,28 @@ func (b *Bridge) me() types.JID {
 		return types.EmptyJID
 	}
 	return b.cli.Store.ID.ToNonAD()
+}
+
+// wipe forgets the account: its chats, messages, media keys, pictures and
+// downloads. For a logout, from here or from the phone, and for a start
+// without a session, so a new one never shows the last one's chats.
+func (b *Bridge) wipe() {
+	for _, t := range []string{"chats", "messages", "media"} {
+		b.db.Exec("DELETE FROM " + t)
+	}
+	b.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+	b.db.Exec("VACUUM")
+	dirs := []string{filepath.Join(b.dir, "avatars")}
+	if cache, err := os.UserCacheDir(); err == nil {
+		dirs = append(dirs, filepath.Join(cache, "whatsapp-tui", "media"))
+	}
+	// The folders stay: the avatar workers write into theirs.
+	for _, dir := range dirs {
+		entries, _ := os.ReadDir(dir)
+		for _, e := range entries {
+			os.RemoveAll(filepath.Join(dir, e.Name()))
+		}
+	}
 }
 
 // stored says the device has its stores: a fresh one (never paired, or just

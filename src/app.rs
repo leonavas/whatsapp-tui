@@ -553,6 +553,8 @@ impl App {
         match e {
             Event::Qr { code } => {
                 self.account.signing_out = false;
+                // No session: whatever is still here was the last account's.
+                self.forget_account();
                 self.phase = Phase::Qr(code);
             }
             Event::Paired => self.phase = Phase::Connecting,
@@ -574,13 +576,7 @@ impl App {
             }
             Event::LoggedOut => {
                 self.phase = Phase::LoggedOut;
-                self.chats.clear();
-                self.msgs.clear();
-                self.open = None;
-                self.profile = None;
-                if let Some(j) = self.my_jid() {
-                    self.avatars.remove(&j);
-                }
+                self.forget_account();
                 (self.me, self.me_name) = Default::default();
                 // Only whether it was ours stays, for the screen that follows.
                 let ours = self.account.signing_out;

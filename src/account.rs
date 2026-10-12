@@ -225,6 +225,20 @@ impl App {
         self.note("Desconectando…");
     }
 
+    /// Everything of the account that went away, on screen and on disk (the
+    /// bridge wipes its own: chats, messages, pictures, downloads).
+    pub(crate) fn forget_account(&mut self) {
+        self.chats.clear();
+        self.msgs.clear();
+        self.open = None;
+        self.cursor = None;
+        self.profile = None;
+        self.avatars.clear();
+        self.events.forget();
+        self.clear_drafts();
+        self.emoji_panel.forget_recent();
+    }
+
     fn open_my_profile(&mut self) {
         let Some(jid) = self.my_jid() else { return };
         self.account.profile = Some(None);
