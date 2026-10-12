@@ -21,7 +21,8 @@ The interface is in Brazilian Portuguese for now.
   kitty, ghostty, WezTerm, foot or any sixel terminal. Others fall back to
   half-block images.
 - A [Nerd Font](https://www.nerdfonts.com/) for the icons.
-- Optional, at run time: `mpv` for voice notes and audio, `wl-paste` or
+- Optional, at run time: `mpv` for voice notes, audio and videos, `ffmpeg`
+  for sharper video previews, `wl-paste` or
   `xclip` to paste pictures, `zenity`, `yad` or `kdialog` to pick files.
 
 ## Install
@@ -75,26 +76,51 @@ The first start shows a QR code: scan it in WhatsApp on your phone, under
 | `↑` `↓` / `k` `j`, `g` `G` | move through the chats |
 | `Enter` / `→` / `l` | open the chat |
 | `Ctrl+N` / `Ctrl+P` | open the next or previous chat |
-| `/` | search chats, contacts, messages and phone numbers |
+| `/`, `Ctrl+K` | search chats, contacts, messages and phone numbers (`Ctrl+K` from anywhere, the message box too) |
 | `1` `2` `3` `4` | all chats, unread, favorites, groups |
 | `m` | the chat's menu: archive, pin, mark read or unread, mute, favorite, clear, delete |
 | `Esc` / `←` | out of the archived chats |
 | `Tab` | between the chat list and the message box |
 | `i` | the contact's or group's details |
 | `Space` | play or pause the open chat's last audio |
+| `v` | open the open chat's last video in the viewer |
+| `Space` / `Enter`, `o`, `Esc` / `q` | in the viewer: play or stop the video, open it outside the app, close |
 | `PgUp` `PgDn` | scroll the conversation |
 | `Enter` / `Shift+Enter` | send / new line |
 | `Ctrl+B` / `Ctrl+I` | bold / italic (`Alt+B` / `Alt+I` where the terminal keeps them) |
 | `Ctrl+Shift+X` `M` `C` | strikethrough, monospace, code (`Alt+X` `Alt+M` `Alt+C` too) |
 | `Ctrl+Shift+9` | make the line a quote, or not |
 | `:` | emoji by name |
+| `Alt+E` / `Alt+A` | the emoji panel / attach files |
 | `Ctrl+V` | paste a picture or files |
-| `Alt+S` / `,` | your account: pause notifications, profile, settings, disconnect |
+| `Alt+S` / `,` | your account: pause notifications, profile, settings, shortcuts, disconnect |
+| `Ctrl+/` / `?` | the keyboard shortcuts (`?` from the chat list) |
 | `q`, `Ctrl+C` | quit |
 
-The mouse works too: click chats, links, audio players, the clip and the
-smiley in the message box, and your name at the foot of the chat list;
-right-click a chat (or click the chevron by its time) for its menu.
+All of them are also in your name › **Atalhos de teclado**, which follows
+whether Enter sends.
+
+The mouse works too: click chats, links, audio players, photos and videos (open
+them in the viewer; a click outside the picture closes it), a business message's link buttons, the clip
+and the smiley in the message box, and your name at the foot of the chat
+list; right-click a chat (or click the chevron by its time) for its menu.
+
+## Photos and videos
+
+Photos and videos show inside their bubbles, as on WhatsApp Web: the
+message's thumbnail at once, the photo itself once it's downloaded (photos on
+screen download by themselves; for older ones the phone isn't asked). A click
+opens one in the viewer, as WhatsApp Web's: big over the whole window, with
+who sent it, when, and its caption. A video (GIFs too, looped and muted)
+plays there through `mpv --vo=kitty` in terminals that speak kitty's graphics
+protocol (kitty, ghostty); the rest of the screen waits while it plays, and
+when it ends its picture stays, to play again. `o` opens it outside the app.
+Elsewhere, or with **Tocar vídeos no app** off in the settings, a video opens
+in an mpv window, and without mpv in whatever `xdg-open` picks; photos open
+in your image viewer in terminals without pictures. With `ffmpeg` installed, a downloaded video's bubble gets a
+sharper frame than the thumbnail. Messages from businesses (and from
+WhatsApp itself) show their header picture, title, footer and buttons; link
+buttons open in the browser.
 
 ## Chats
 

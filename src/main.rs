@@ -20,11 +20,15 @@ mod events;
 mod ipc;
 mod links;
 mod markup;
+mod media;
 mod player;
 mod ticks;
 mod tray;
+mod shortcuts;
 mod ui;
 mod update;
+mod video;
+mod viewer;
 
 use crossterm::event::{
     self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste, EnableFocusChange, EnableMouseCapture,
@@ -41,6 +45,11 @@ pub enum Ev {
     Attach(attach::Ev),
     /// Where the audio playing is.
     Player(player::Ev),
+    /// A video's mpv gone.
+    Video(video::Ev),
+    /// A photo (or a video's picture) read from disk, off the UI thread;
+    /// None when it couldn't be.
+    Picture(String, Option<image::DynamicImage>),
     /// A command from another process: the CLI, the bar widget, the tray.
     Remote(ipc::Cmd),
     /// A newer release, or how a check or an install went (`update`).
@@ -136,7 +145,17 @@ fn main() {
     // (so no resize comes): measured on resize, on focus and every second.
     let (mut cell, mut cell_at) = (cell_px(), Instant::now());
     while !app.quit {
-        if std::mem::take(&mut app.recheck_cell) || cell_at.elapsed() >= Duration::from_secs(1) {
+        // A video played inside the terminal: its frames are gone, and so
+        // are the pictures mpv took off with them, and the mouse it let go.
+        if std::mem::take(&mut app.repaint) {
+            use std::io::Write;
+            let _ = write!(std::io::stdout(), "\x1b_Ga=d,d=A,q=2\x1b\\");
+            app.protocols.clear();
+            let _ = term.clear();
+            let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture);
+            let _ = term.hide_cursor();
+        }
+        if !app.video.covers() && (std::mem::take(&mut app.recheck_cell) || cell_at.elapsed() >= Duration::from_secs(1)) {
             cell_at = Instant::now();
             let now = cell_px();
             if let Some((w, h)) = now.filter(|_| now != cell) {
@@ -154,7 +173,12 @@ fn main() {
             // A pause dims it, like the widget.
             t.set(if app.paused() { 0 } else { app.attention() });
         }
-        let _ = term.draw(|f| ui::draw(f, &mut app));
+        // mpv has the screen while a video plays inside it; one about to
+        // starts once the viewer under it is on screen.
+        if !app.video.covers() {
+            let _ = term.draw(|f| ui::draw(f, &mut app));
+            app.after_draw();
+        }
         match rx.recv_timeout(Duration::from_millis(200)) {
             // A history sync arrives in bursts: take all of it before drawing again.
             Ok(ev) => {
@@ -169,6 +193,7 @@ fn main() {
         app.tick();
     }
 
+    app.video.shutdown();
     let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags, DisableMouseCapture, DisableBracketedPaste, DisableFocusChange);
     app.save_drafts();
     ratatui::restore();

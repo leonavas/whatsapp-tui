@@ -48,23 +48,11 @@ pub fn silhouette(side: u32, group: bool) -> DynamicImage {
     DynamicImage::ImageRgba8(img)
 }
 
-/// The official account's picture: WhatsApp's speech bubble, white on green.
+/// The official account's picture: WhatsApp's logo, white on green, as
+/// WhatsApp Web shows it.
 pub fn official(side: u32) -> DynamicImage {
-    let s = side as f32;
-    let r = s / 2.0;
-    let mut img = RgbaImage::new(side, side);
-    for (x, y, p) in img.enumerate_pixels_mut() {
-        let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
-        let ring = in_circle(px, py, r, r, 0.30 * s) * (1.0 - in_circle(px, py, r, r, 0.24 * s));
-        // The bubble's tail, down and to the left.
-        let (tx, ty) = ((px - 0.26 * s) / s, (py - 0.74 * s) / s);
-        let tail = if tx >= -0.06 && ty <= 0.06 && tx - ty <= 0.0 && tx >= -0.06 && ty >= -0.10 { 1.0 } else { 0.0 };
-        let dot = in_circle(px, py, r, r, 0.10 * s);
-        let white = ring.max(tail).max(dot);
-        let mix = |g: u8| (g as f32 + (255.0 - g as f32) * white) as u8;
-        *p = Rgba([mix(0x25), mix(0xD3), mix(0x66), (255.0 * in_circle(px, py, r, r, r)) as u8]);
-    }
-    DynamicImage::ImageRgba8(img)
+    let logo = image::load_from_memory(include_bytes!("../assets/official.png")).expect("official.png");
+    logo.resize_exact(side, side, image::imageops::FilterType::CatmullRom)
 }
 
 fn in_rect(x: f32, y: f32, x0: f32, y0: f32, x1: f32, y1: f32) -> f32 {

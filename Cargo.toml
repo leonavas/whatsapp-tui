@@ -1,6 +1,6 @@
 [package]
 name = "whatsapp-tui"
-version = "0.1.2"
+version = "0.1.4"
 edition = "2021"
 description = "A lightweight WhatsApp client for the terminal"
 license = "Apache-2.0"
@@ -22,6 +22,8 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 rustybuzz = "0.12"
 unicode-segmentation = "1"
 ksni = { version = "0.3", features = ["blocking"] }
+# SIGTERM for mpv playing a video, so it takes its pictures off the screen.
+libc = "0.2"
 
 [workspace]
 

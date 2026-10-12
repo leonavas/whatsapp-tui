@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go.mau.fi/whatsmeow"
@@ -119,4 +120,52 @@ func mapsLink(address string, lat, lon float64) string {
 		q = fmt.Sprintf("%f,%f", lat, lon)
 	}
 	return "https://www.google.com/maps/search/?api=1&query=" + url.QueryEscape(q)
+}
+
+// setVerified keeps a business's verification level, as GetUserInfo has
+// it: WhatsApp Web's check goes by the name of the "high" ones.
+func (b *Bridge) setVerified(chat string, vn *types.VerifiedName) {
+	level := "none"
+	if vn != nil && vn.VerifiedLevel != "" {
+		level = vn.VerifiedLevel
+	}
+	var old string
+	b.db.QueryRow(`SELECT verified FROM chats WHERE jid = ?`, chat).Scan(&old)
+	if old != level {
+		b.db.Exec(`UPDATE chats SET verified = ? WHERE jid = ?`, level, chat)
+		b.dirty.Store(true)
+	}
+}
+
+var askedVerified sync.Map
+
+// verifiedOnce asks, the first time a business's chat opens, whether its
+// name gets the check; its messages say so too as they come.
+func (b *Bridge) verifiedOnce(chat string) {
+	jid, err := types.ParseJID(chat)
+	if err != nil || jid.Server != types.DefaultUserServer || jid == types.PSAJID || !b.stored() {
+		return
+	}
+	if _, busy := askedVerified.LoadOrStore(chat, true); busy {
+		return
+	}
+	var level string
+	if b.db.QueryRow(`SELECT verified FROM chats WHERE jid = ?`, chat).Scan(&level) != nil || level != "" {
+		return
+	}
+	// Only businesses: their verified name is in the contact store.
+	if c, err := b.cli.Store.Contacts.GetContact(b.ctx, jid); err != nil || c.BusinessName == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(b.ctx, 20*time.Second)
+	defer cancel()
+	info, err := b.cli.GetUserInfo(ctx, []types.JID{jid})
+	if err != nil {
+		logf("verified %s: %v", jid, err)
+		askedVerified.Delete(chat)
+		return
+	}
+	for _, u := range info {
+		b.setVerified(chat, u.VerifiedName)
+	}
 }

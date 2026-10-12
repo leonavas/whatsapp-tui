@@ -49,10 +49,14 @@ type Msg struct {
 	Quote      string `json:"quote,omitempty"`
 	// A photo, video, audio, document or sticker; nil for the rest.
 	Media *Media `json:"media,omitempty"`
+	// A business's title, footer and buttons around the text.
+	Card *Card `json:"card,omitempty"`
 	// 0 pending, 1 sent, 2 delivered, 3 read.
 	Status int `json:"status"`
 	// Stored just now, not a new version of one we had.
 	fresh bool
+	// Its media's part, for the picture once it's shown.
+	part *waE2E.Message
 }
 
 // Chat is one row of the sidebar.
@@ -74,6 +78,8 @@ type Chat struct {
 	Status int `json:"status"`
 	// Why nothing can be sent here; empty when it can.
 	ReadOnly string `json:"read_only"`
+	// WhatsApp itself, or a business with WhatsApp's check by its name.
+	Verified bool `json:"verified"`
 }
 
 type Cmd struct {
@@ -81,8 +87,10 @@ type Cmd struct {
 	Chat  string `json:"chat"`
 	Text  string `json:"text"`
 	Limit int    `json:"limit"`
-	// download: the message whose media to fetch.
-	ID string `json:"id"`
+	// download: the message whose media to fetch; Auto when nobody
+	// clicked (a photo shown), so the phone isn't asked for it.
+	ID   string `json:"id"`
+	Auto bool   `json:"auto"`
 	// send_file: a file on disk, its name as sent, and what it goes as
 	// (image, video, audio, document); Temp ones are removed once sent.
 	Path    string `json:"path"`
@@ -173,7 +181,10 @@ CREATE TABLE IF NOT EXISTS chats (
 	-- Marked as unread by hand.
 	marked INTEGER NOT NULL DEFAULT 0,
 	-- Cleared: listed without messages until one comes.
-	cleared INTEGER NOT NULL DEFAULT 0
+	cleared INTEGER NOT NULL DEFAULT 0,
+	-- A business's verified_level ("high" gets the check), "none" when it
+	-- has none; empty until asked.
+	verified TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS messages (
 	chat TEXT NOT NULL,
@@ -187,6 +198,8 @@ CREATE TABLE IF NOT EXISTS messages (
 	status INTEGER NOT NULL DEFAULT 0,
 	-- The sender as WhatsApp has it (maybe a LID), for message keys.
 	wa_sender TEXT NOT NULL DEFAULT '',
+	-- A business's Card, as JSON; empty for the rest.
+	card TEXT NOT NULL DEFAULT '',
 	PRIMARY KEY (chat, id)
 );
 CREATE INDEX IF NOT EXISTS messages_chat_ts ON messages (chat, ts);
@@ -251,6 +264,8 @@ func main() {
 		`chats ADD COLUMN marked INTEGER NOT NULL DEFAULT 0`,
 		`chats ADD COLUMN cleared INTEGER NOT NULL DEFAULT 0`,
 		`messages ADD COLUMN wa_sender TEXT NOT NULL DEFAULT ''`,
+		`messages ADD COLUMN card TEXT NOT NULL DEFAULT ''`,
+		`chats ADD COLUMN verified TEXT NOT NULL DEFAULT ''`,
 	} {
 		db.Exec(`ALTER TABLE ` + col)
 	}
@@ -355,7 +370,7 @@ func (b *Bridge) commands() {
 			default:
 			}
 		case "download":
-			go b.download(c.Chat, c.ID)
+			go b.download(c.Chat, c.ID, c.Auto)
 		case "logout":
 			// Unlinks this device on the phone too; offline, nothing changes.
 			if err := b.cli.Logout(b.ctx); err != nil {
@@ -377,6 +392,7 @@ func (b *Bridge) handle(raw any) {
 		emit(map[string]any{"t": "ready", "me": b.cli.Store.ID.User, "name": b.cli.Store.PushName})
 		go b.syncGroups()
 		go b.resyncOnce()
+		go b.bizNamesOnce()
 	case *events.LoggedOut:
 		_ = b.cli.Store.Delete(b.ctx)
 		b.wipe()
@@ -386,6 +402,9 @@ func (b *Bridge) handle(raw any) {
 		b.historySync(e)
 	case *events.Message:
 		if m := b.message(e, 1); m != nil {
+			if m.Media != nil {
+				m.Media.picture(m.Chat, m.ID, m.part)
+			}
 			// Someone else's message we didn't have: edits, deletions and
 			// what the phone resends are not news.
 			news := m.fresh && !m.FromMe && e.UnavailableRequestID == ""
@@ -548,12 +567,17 @@ func (b *Bridge) message(e *events.Message, status int) *Msg {
 		Chat: chat.String(), ID: e.Info.ID, Sender: sender.String(), FromMe: e.Info.IsFromMe,
 		TS: e.Info.Timestamp.Unix(), Text: text, Quote: quote, Status: status,
 	}
+	lo := cardOf(e.Message)
+	card := cardJSON(lo)
+	if card != "" {
+		m.Card = &lo.card
+	}
 	var had int
 	m.fresh = b.db.QueryRow(`SELECT 1 FROM messages WHERE chat = ? AND id = ?`, m.Chat, m.ID).Scan(&had) != nil
-	_, err := b.db.Exec(`INSERT INTO messages (chat, id, sender, push_name, from_me, ts, text, quote, status, wa_sender)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT (chat, id) DO UPDATE SET text = excluded.text, status = max(status, excluded.status)`,
-		m.Chat, m.ID, m.Sender, e.Info.PushName, m.FromMe, m.TS, m.Text, m.Quote, m.Status, e.Info.Sender.ToNonAD().String())
+	_, err := b.db.Exec(`INSERT INTO messages (chat, id, sender, push_name, from_me, ts, text, quote, status, wa_sender, card)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (chat, id) DO UPDATE SET text = excluded.text, status = max(status, excluded.status), card = excluded.card`,
+		m.Chat, m.ID, m.Sender, e.Info.PushName, m.FromMe, m.TS, m.Text, m.Quote, m.Status, e.Info.Sender.ToNonAD().String(), card)
 	if err != nil {
 		return nil
 	}
@@ -561,9 +585,13 @@ func (b *Bridge) message(e *events.Message, status int) *Msg {
 	b.db.Exec(`INSERT INTO chats (jid, last_ts, wa_jid) VALUES (?, ?, ?)
 		ON CONFLICT (jid) DO UPDATE SET last_ts = max(last_ts, excluded.last_ts),
 			wa_jid = CASE WHEN wa_jid = '' THEN excluded.wa_jid ELSE wa_jid END`, m.Chat, m.TS, e.Info.Chat.ToNonAD().String())
+	// A business's level comes with each of its messages: "high" gets the check.
+	if vn := e.Info.VerifiedName; vn != nil && vn.VerifiedLevel != "" && !e.Info.IsGroup && !e.Info.IsFromMe {
+		b.db.Exec(`UPDATE chats SET verified = ? WHERE jid = ?`, vn.VerifiedLevel, m.Chat)
+	}
 	if md, part := mediaOf(e.Message); md != nil {
 		b.storeMedia(m.Chat, m.ID, md, part, e.Info.Chat.String(), e.Info.Sender.String())
-		m.Media = md
+		m.Media, m.part = md, part
 	}
 	m.SenderName = b.senderName(sender, e.Info.PushName)
 	b.dirty.Store(true)
@@ -596,6 +624,9 @@ func withCaption(label, caption string) string {
 // textOf is how a message reads in the TUI; false for the ones that aren't
 // shown (reactions, key exchanges, protocol messages).
 func textOf(m *waE2E.Message) (string, bool) {
+	if c := cardOf(m); c != nil {
+		return c.text(), true
+	}
 	switch {
 	case m == nil:
 		return "", false
@@ -625,6 +656,15 @@ func textOf(m *waE2E.Message) (string, bool) {
 		return "📊 " + m.GetPollCreationMessage().GetName(), true
 	case m.GetPollCreationMessageV3() != nil:
 		return "📊 " + m.GetPollCreationMessageV3().GetName(), true
+	// Answers to a business's buttons and lists: what was picked.
+	case m.GetTemplateButtonReplyMessage().GetSelectedDisplayText() != "":
+		return m.GetTemplateButtonReplyMessage().GetSelectedDisplayText(), true
+	case m.GetButtonsResponseMessage().GetSelectedDisplayText() != "":
+		return m.GetButtonsResponseMessage().GetSelectedDisplayText(), true
+	case m.GetListResponseMessage().GetTitle() != "":
+		return m.GetListResponseMessage().GetTitle(), true
+	case m.GetInteractiveResponseMessage().GetBody().GetText() != "":
+		return m.GetInteractiveResponseMessage().GetBody().GetText(), true
 	}
 	return "", false
 }
@@ -689,6 +729,11 @@ func (b *Bridge) historySync(e *events.HistorySync) {
 			evt, err := b.cli.ParseWebMessage(jid, web)
 			if err != nil {
 				continue
+			}
+			// A business's verified name, as WhatsApp Web shows it in place of
+			// the number; live messages get it from whatsmeow itself.
+			if biz := web.GetVerifiedBizName(); biz != "" && !evt.Info.IsFromMe && !evt.Info.IsGroup && b.stored() {
+				b.cli.Store.Contacts.PutBusinessName(b.ctx, b.norm(evt.Info.Sender), biz)
 			}
 			// WebMessageInfo: 2 server ack, 3 delivered, 4 read, 5 played.
 			status := 1
@@ -868,7 +913,7 @@ func (b *Bridge) flushChats() {
 // groups we're in and the contacts we know stay out until someone writes.
 func (b *Bridge) chats() []Chat {
 	// Cleared ones stay, empty, as on the phone.
-	rows, err := b.db.Query(`SELECT c.jid, c.name, c.last_ts, c.unread, c.pinned, c.archived, c.mute_until, c.read_only, c.favorite,
+	rows, err := b.db.Query(`SELECT c.jid, c.name, c.last_ts, c.unread, c.pinned, c.archived, c.mute_until, c.read_only, c.favorite, c.verified,
 		COALESCE(m.text, ''), COALESCE(m.from_me, 0), COALESCE(m.status, 0)
 		FROM chats c LEFT JOIN messages m ON m.rowid = (
 			SELECT rowid FROM messages WHERE chat = c.jid ORDER BY ts DESC LIMIT 1)
@@ -882,10 +927,12 @@ func (b *Bridge) chats() []Chat {
 	for rows.Next() {
 		var c Chat
 		var mute, fav int64
-		if rows.Scan(&c.JID, &c.Name, &c.LastTS, &c.Unread, &c.PinTS, &c.Archived, &mute, &c.ReadOnly, &fav, &c.Preview, &c.FromMe, &c.Status) != nil {
+		var level string
+		if rows.Scan(&c.JID, &c.Name, &c.LastTS, &c.Unread, &c.PinTS, &c.Archived, &mute, &c.ReadOnly, &fav, &level, &c.Preview, &c.FromMe, &c.Status) != nil {
 			continue
 		}
 		jid, _ := types.ParseJID(c.JID)
+		c.Verified = jid == types.PSAJID || level == "high"
 		c.Group = jid.Server == types.GroupServer
 		c.Muted = mute == muteForever || mute > now
 		c.Pinned = c.PinTS > 0
@@ -923,8 +970,8 @@ func (b *Bridge) load(chat, id string) *Msg {
 
 func (b *Bridge) query(where string, args ...any) []Msg {
 	// Media's columns don't clash with what callers filter on: chat and id are the join's.
-	rows, err := b.db.Query(`SELECT chat, id, sender, push_name, from_me, ts, text, quote, status,
-		COALESCE(kind, ''), COALESCE(mime, ''), COALESCE(seconds, 0), COALESCE(ptt, 0)
+	rows, err := b.db.Query(`SELECT chat, id, sender, push_name, from_me, ts, text, quote, status, card,
+		COALESCE(kind, ''), COALESCE(mime, ''), COALESCE(seconds, 0), COALESCE(ptt, 0), proto
 		FROM messages LEFT JOIN media USING (chat, id) `+where, args...)
 	if err != nil {
 		return nil
@@ -936,11 +983,18 @@ func (b *Bridge) query(where string, args ...any) []Msg {
 		var m Msg
 		var push string
 		var md Media
-		if rows.Scan(&m.Chat, &m.ID, &m.Sender, &push, &m.FromMe, &m.TS, &m.Text, &m.Quote, &m.Status, &md.Kind, &md.Mime, &md.Seconds, &md.PTT) != nil {
+		var card string
+		var blob []byte
+		if rows.Scan(&m.Chat, &m.ID, &m.Sender, &push, &m.FromMe, &m.TS, &m.Text, &m.Quote, &m.Status, &card, &md.Kind, &md.Mime, &md.Seconds, &md.PTT, &blob) != nil {
 			continue
 		}
 		if md.Kind != "" {
+			md.picture(m.Chat, m.ID, partOf(blob))
 			m.Media = &md
+		}
+		if card != "" {
+			m.Card = &Card{}
+			json.Unmarshal([]byte(card), m.Card)
 		}
 		key := m.Sender + "\x00" + push
 		if n, ok := names[key]; ok {
@@ -959,6 +1013,7 @@ func (b *Bridge) history(chat string, limit int) {
 	if limit <= 0 {
 		limit = 300
 	}
+	go b.verifiedOnce(chat)
 	ms := b.query(`WHERE chat = ? ORDER BY ts DESC LIMIT ?`, chat, limit)
 	for i, j := 0, len(ms)-1; i < j; i, j = i+1, j-1 {
 		ms[i], ms[j] = ms[j], ms[i]
@@ -1231,6 +1286,7 @@ func (b *Bridge) profile(chat string) {
 				if u.VerifiedName != nil {
 					verified = u.VerifiedName.Details.GetVerifiedName()
 				}
+				b.setVerified(chat, u.VerifiedName)
 			}
 		}
 		if verified == "" {

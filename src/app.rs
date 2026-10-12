@@ -8,7 +8,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::Protocol;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
@@ -68,9 +68,10 @@ impl Item {
 
     pub fn height(&self) -> u16 {
         match self {
-            Item::Header(_) | Item::Info(_) => 1,
-            // A line and a row of air.
-            Item::Archived | Item::Back => 2,
+            Item::Info(_) => 1,
+            // A line and a row of air: under a header, the air the chat below
+            // pads its highlight with, as in the list.
+            Item::Header(_) | Item::Archived | Item::Back => 2,
             // Two lines and a row of air, as WhatsApp Web spaces them.
             _ => 3,
         }
@@ -113,6 +114,23 @@ pub struct AudioHit {
     pub chat: String,
     pub id: String,
     pub secs: u32,
+}
+
+/// A photo or a video's picture, read from disk off the UI thread.
+pub enum Picture {
+    Loading,
+    Ready(DynamicImage),
+    Failed,
+}
+
+/// A photo or video in a bubble on screen: a click opens it in the viewer.
+#[derive(Clone)]
+pub struct MediaHit {
+    pub rect: Rect,
+    pub chat: String,
+    pub id: String,
+    pub video: bool,
+    pub gif: bool,
 }
 
 /// The search's answer from the bridge, for the text it was asked about.
@@ -188,6 +206,8 @@ pub struct App {
     /// The sidebar's rows on screen, by key.
     pub side_hits: Vec<(Rect, String)>,
     pub header_area: Rect,
+    /// The round button down to the newest message, while scrolled up.
+    pub newest_btn: Rect,
     pub panel_area: Rect,
     pub panel_close: Rect,
     /// Group members in the panel, to open a chat with.
@@ -200,6 +220,19 @@ pub struct App {
     pub msg_links: Vec<(Rect, String)>,
     pub audio_hits: Vec<AudioHit>,
     pub player: crate::player::Player,
+    /// Photos and videos on screen.
+    pub media_hits: Vec<MediaHit>,
+    pub video: crate::video::Video,
+    /// The photo or video open big, over everything.
+    pub viewer: Option<crate::viewer::View>,
+    /// A video played inside the terminal is gone: everything is drawn again.
+    pub repaint: bool,
+    /// Photos and videos' pictures by path, read once.
+    pub pictures: HashMap<String, Picture>,
+    /// Photos asked of the bridge as they showed, once each.
+    fetched: HashSet<(String, String)>,
+    /// A photo or video opened outside the app once it's downloaded.
+    pub(crate) open_when_ready: Option<(String, String)>,
     /// Real pictures (kitty, sixel, iTerm2); None in terminals without them.
     pub picker: Option<Picker>,
     pub avatars: HashMap<String, Avatar>,
@@ -274,8 +307,16 @@ impl App {
             panel_week: Rect::default(),
             panel_maps: Rect::default(),
             msg_links: Vec::new(),
+            newest_btn: Rect::default(),
             audio_hits: Vec::new(),
             player: crate::player::Player::new(tx.clone()),
+            media_hits: Vec::new(),
+            video: crate::video::Video::new(tx.clone()),
+            viewer: None,
+            repaint: false,
+            pictures: HashMap::new(),
+            fetched: HashSet::new(),
+            open_when_ready: None,
             picker,
             avatars: HashMap::new(),
             protocols: HashMap::new(),
@@ -345,6 +386,7 @@ impl App {
             }
         }
         self.drafts_tick();
+        self.video.tick();
     }
 
     /// The name to show for a chat, also one opened from the search.
@@ -601,11 +643,27 @@ impl App {
                 self.recheck_cell = true;
                 self.set_focused(true)
             }
-            Ev::Term(TermEvent::Resize(..)) => self.recheck_cell = true,
+            Ev::Term(TermEvent::Resize(..)) => {
+                // Its place on screen moves: the video stops.
+                self.video.stop();
+                self.recheck_cell = true
+            }
             Ev::Term(TermEvent::FocusLost) => self.set_focused(false),
             Ev::Bridge(e) => self.on_bridge(e),
             Ev::Attach(e) => self.on_attach(e),
             Ev::Player(e) => self.player.on(e),
+            Ev::Video(e) => {
+                if self.video.on(e) {
+                    self.repaint = true;
+                    // Over: the viewer shows its picture again, to play once more.
+                    if let Some(v) = self.viewer.as_mut().filter(|v| v.state == crate::viewer::State::Playing) {
+                        v.state = crate::viewer::State::Idle;
+                    }
+                }
+            }
+            Ev::Picture(path, img) => {
+                self.pictures.insert(path, img.map_or(Picture::Failed, Picture::Ready));
+            }
             // An empty paste: the clipboard holds a picture or files.
             Ev::Term(TermEvent::Paste(s)) if self.focus == Focus::Input && s.is_empty() => self.paste_clipboard(),
             Ev::Term(TermEvent::Key(k)) => self.key(k),
@@ -746,10 +804,16 @@ impl App {
                     }
                     if self.player.of(&chat, &id).is_some() {
                         self.player.stop();
-                        self.note(error);
+                        self.note(error.clone());
                     }
                 } else if let Err(e) = self.player.ready(&chat, &id, &path) {
                     self.note(e);
+                }
+                self.media_arrived(&chat, &id, &path, &error);
+            }
+            Event::Thumb { chat, id, path } => {
+                if let Some(md) = self.msgs.get_mut(&chat).and_then(|l| l.iter_mut().find(|m| m.id == id)).and_then(|m| m.media.as_mut()) {
+                    md.thumb = path;
                 }
             }
             Event::Error { text, fatal } => {
@@ -815,6 +879,7 @@ impl App {
                     from_me: m.from_me,
                     status: m.status,
                     read_only: String::new(),
+                    verified: false,
                 });
             }
         }
@@ -840,6 +905,117 @@ impl App {
         }
     }
 
+    /// A photo or video downloaded (or not): it shows, opens or plays.
+    fn media_arrived(&mut self, chat: &str, id: &str, path: &str, error: &str) {
+        if error.is_empty() {
+            if let Some(md) = self.msgs.get_mut(chat).and_then(|l| l.iter_mut().find(|m| m.id == id)).and_then(|m| m.media.as_mut()) {
+                md.file = path.to_string();
+            }
+        }
+        let key = (chat.to_string(), id.to_string());
+        if self.open_when_ready.as_ref() == Some(&key) {
+            self.open_when_ready = None;
+            if error.is_empty() {
+                self.open_outside(chat, id, path);
+            } else {
+                self.note(error);
+            }
+        }
+        self.viewer_media(chat, id, error);
+    }
+
+    /// Opens it outside the app: a video in mpv's window, a photo in the
+    /// image viewer.
+    pub(crate) fn open_outside(&mut self, chat: &str, id: &str, path: &str) {
+        let md = self.msgs.get(chat).and_then(|l| l.iter().find(|m| m.id == id)).and_then(|m| m.media.as_ref());
+        match md.filter(|md| md.kind == "video") {
+            Some(md) => {
+                if let Err(e) = crate::video::external(path, md.gif) {
+                    self.note(e);
+                }
+            }
+            None => crate::links::open(path),
+        }
+    }
+
+    /// Downloading to open outside the app.
+    pub(crate) fn opening(&self, chat: &str, id: &str) -> bool {
+        self.open_when_ready.as_ref().is_some_and(|(c, i)| c == chat && i == id)
+    }
+
+    /// The message's file, when it's on disk.
+    pub(crate) fn media_file(&self, chat: &str, id: &str) -> Option<String> {
+        let md = self.msgs.get(chat).and_then(|l| l.iter().find(|m| m.id == id)).and_then(|m| m.media.as_ref())?;
+        Some(md.file.clone()).filter(|f| !f.is_empty() && std::path::Path::new(f).exists())
+    }
+
+    /// Videos play in the viewer where the terminal speaks kitty's
+    /// graphics and the setting's on; elsewhere in mpv's window.
+    pub(crate) fn plays_inside(&self) -> bool {
+        let kitty = self.picker.as_ref().is_some_and(|p| p.protocol_type() == ratatui_image::picker::ProtocolType::Kitty);
+        kitty && self.settings.on(crate::config::VIDEO_INLINE)
+    }
+
+    /// A click on a photo or video opens it in the viewer, a video playing
+    /// at once; without pictures (or, for a video, without kitty's or with
+    /// the setting off) it opens outside, once it's downloaded.
+    fn open_media(&mut self, h: MediaHit) {
+        let inside = if h.video { self.plays_inside() } else { self.picker.is_some() };
+        if inside {
+            return self.open_viewer(&h.chat, &h.id, h.video, h.gif);
+        }
+        if self.opening(&h.chat, &h.id) {
+            self.open_when_ready = None;
+            return;
+        }
+        match self.media_file(&h.chat, &h.id) {
+            Some(f) => self.open_outside(&h.chat, &h.id, &f),
+            None => {
+                self.open_when_ready = Some((h.chat.clone(), h.id.clone()));
+                self.cmd(json!({"c": "download", "chat": h.chat, "id": h.id}));
+            }
+        }
+    }
+
+    /// A photo on screen is fetched by itself, as WhatsApp Web does; only
+    /// what WhatsApp's servers still have, the phone isn't asked.
+    pub(crate) fn want_photo(&mut self, chat: &str, id: &str) {
+        if self.fetched.insert((chat.to_string(), id.to_string())) {
+            self.cmd(json!({"c": "download", "chat": chat, "id": id, "auto": true}));
+        }
+    }
+
+    /// A picture on disk, read off the UI thread the first time it's wanted.
+    pub(crate) fn picture(&mut self, path: &str) -> Option<&DynamicImage> {
+        if path.is_empty() {
+            return None;
+        }
+        if !self.pictures.contains_key(path) {
+            self.pictures.insert(path.to_string(), Picture::Loading);
+            let (tx, path) = (self.tx.clone(), path.to_string());
+            std::thread::spawn(move || {
+                // Big photos come down to what a bubble can show.
+                let img = image::open(&path).ok().map(|i| if i.width().max(i.height()) > 1280 { i.thumbnail(1280, 1280) } else { i });
+                let _ = tx.send(Ev::Picture(path, img));
+            });
+        }
+        match self.pictures.get(path) {
+            Some(Picture::Ready(img)) => Some(img),
+            _ => None,
+        }
+    }
+
+    /// `v` on the sidebar: the open chat's last video, in the viewer.
+    fn play_last_video(&mut self) {
+        let Some(chat) = self.open.clone() else { return };
+        let last = self.msgs.get(&chat).and_then(|l| {
+            l.iter().rev().find_map(|m| m.media.as_ref().filter(|md| md.kind == "video").map(|md| (m.id.clone(), md.gif)))
+        });
+        if let Some((id, gif)) = last {
+            self.open_media(MediaHit { rect: Rect::default(), chat, id, video: true, gif });
+        }
+    }
+
     /// Space on the sidebar: the open chat's last audio, played or paused.
     fn play_last(&mut self) {
         let Some(chat) = self.open.clone() else { return };
@@ -856,6 +1032,10 @@ impl App {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && k.code == KeyCode::Char('c') {
             self.quit = true;
+            return;
+        }
+        // The viewer's over everything, also while its video has the screen.
+        if self.viewer_key(k) {
             return;
         }
         let main_view = self.phase == Phase::Ready || (!self.chats.is_empty() && matches!(self.phase, Phase::Starting | Phase::Connecting));
@@ -883,6 +1063,12 @@ impl App {
         match k.code {
             KeyCode::Char('n') if ctrl => return self.step_open(1),
             KeyCode::Char('p') if ctrl => return self.step_open(-1),
+            // The search, from anywhere, the message box too.
+            KeyCode::Char('k' | 'K') if ctrl => {
+                self.emoji_panel.open = false;
+                self.focus = Focus::Search;
+                return;
+            }
             KeyCode::PageUp => {
                 self.scroll += page;
                 return;
@@ -922,7 +1108,9 @@ impl App {
             // Ctrl+I is Tab to the terminal; `i` here instead.
             KeyCode::Char('i') => self.toggle_profile(),
             KeyCode::Char(',') => self.open_account_menu(),
+            KeyCode::Char('?') => self.open_shortcuts(),
             KeyCode::Char(' ') => self.play_last(),
+            KeyCode::Char('v') => self.play_last_video(),
             // Out of the archived chats once nothing's searched.
             KeyCode::Esc if self.archived && self.search.is_empty() => self.show_archived(false),
             KeyCode::Esc => {
@@ -1092,7 +1280,7 @@ impl App {
     }
 
     fn mouse(&mut self, m: MouseEvent) {
-        if self.chat_menu_mouse(m) || self.account_mouse(m) || self.emoji_panel_mouse(m) || self.emoji_click(m) || self.attach_mouse(m) {
+        if self.viewer_mouse(m) || self.chat_menu_mouse(m) || self.account_mouse(m) || self.emoji_panel_mouse(m) || self.emoji_click(m) || self.attach_mouse(m) {
             return;
         }
         let at = Position::new(m.column, m.row);
@@ -1130,6 +1318,7 @@ impl App {
                     self.focus_input();
                 }
             }
+            MouseEventKind::Down(MouseButton::Left) if self.newest_btn.contains(at) => self.scroll = 0,
             MouseEventKind::Down(MouseButton::Left) if self.audio_hits.iter().any(|h| h.play.contains(at) || h.track.contains(at)) => {
                 let h = self.audio_hits.iter().find(|h| h.play.contains(at) || h.track.contains(at)).cloned().unwrap();
                 // The track's last cell is the end; mpv's length is better than the message's.
@@ -1139,6 +1328,10 @@ impl App {
                     frac.clamp(0.0, 1.0) * dur
                 });
                 self.play(&h.chat, &h.id, h.secs, seek);
+            }
+            MouseEventKind::Down(MouseButton::Left) if self.media_hits.iter().any(|h| h.rect.contains(at)) => {
+                let h = self.media_hits.iter().find(|h| h.rect.contains(at)).cloned().unwrap();
+                self.open_media(h);
             }
             MouseEventKind::Down(MouseButton::Left) if self.msgs_area.contains(at) && self.msg_links.iter().any(|(r, _)| r.contains(at)) => {
                 if let Some((_, url)) = self.msg_links.iter().find(|(r, _)| r.contains(at)) {

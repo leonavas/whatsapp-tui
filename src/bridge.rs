@@ -36,6 +36,9 @@ pub struct Chat {
     /// Why nothing can be sent here; empty when it can.
     #[serde(default)]
     pub read_only: String,
+    /// WhatsApp itself, or a business with WhatsApp's check by its name.
+    #[serde(default)]
+    pub verified: bool,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -52,6 +55,9 @@ pub struct Msg {
     /// A photo, video, audio, document or sticker, downloadable on demand.
     #[serde(default)]
     pub media: Option<Media>,
+    /// A business's title, footer and buttons around the text.
+    #[serde(default)]
+    pub card: Option<Card>,
     /// Its media couldn't be had, here or from the phone.
     #[serde(skip)]
     pub unavailable: bool,
@@ -68,6 +74,35 @@ pub struct Media {
     pub seconds: u32,
     /// A voice note rather than an audio file.
     pub ptt: bool,
+    /// A photo's or video's size in pixels, when the message says.
+    pub width: u32,
+    pub height: u32,
+    /// A JPEG of it on disk: the message's thumbnail, or a video's frame.
+    pub thumb: String,
+    /// A video that loops without sound.
+    pub gif: bool,
+    /// The file, once it's downloaded.
+    pub file: String,
+}
+
+/// What a business's message has besides its text.
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct Card {
+    pub title: String,
+    pub footer: String,
+    pub buttons: Vec<Button>,
+}
+
+/// A row at the bottom of a business's message; only the ones with a URL
+/// do something here.
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct Button {
+    pub text: String,
+    pub url: String,
+    /// url, reply, call, copy or list.
+    pub kind: String,
 }
 
 /// Someone in the address book we have no chat with yet.
@@ -198,6 +233,8 @@ pub enum Event {
         #[serde(default)]
         error: String,
     },
+    /// A better picture of a downloaded video: a frame of it.
+    Thumb { chat: String, id: String, path: String },
     Error {
         text: String,
         #[serde(default)]

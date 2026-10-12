@@ -2765,13 +2765,14 @@ dependencies = [
 
 [[package]]
 name = "whatsapp-tui"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "chrono",
  "crossterm",
  "emojis",
  "image",
  "ksni",
+ "libc",
  "qrcode",
  "ratatui",
  "ratatui-image",

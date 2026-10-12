@@ -203,6 +203,12 @@ func (b *Bridge) uploadFile(o outFile) {
 	}
 	if md, part := mediaOf(o.msg); md != nil {
 		b.storeMedia(o.cmd.Chat, o.id, md, part, o.jid.String(), b.me().String())
+		// Its bubble gets the picture now that there's a thumbnail.
+		if o.kind == "image" || o.kind == "video" {
+			if m := b.load(o.cmd.Chat, o.id); m != nil {
+				emit(map[string]any{"t": "message", "msg": m})
+			}
+		}
 	}
 	if _, err := b.cli.SendMessage(b.ctx, o.jid, o.msg, whatsmeow.SendRequestExtra{ID: o.id}); err != nil {
 		fail(err)

@@ -57,6 +57,17 @@ const INFO: &str = "\u{f05a}";
 const PIN: &str = "\u{f041}";
 const DOWN: &str = "\u{f107}";
 const UP: &str = "\u{f106}";
+/// WhatsApp's check by a verified business's name, and by its own.
+const CHECK: &str = "\u{f0791}";
+const CHECK_BLUE: Color = Color::Rgb(0x1D, 0x9B, 0xF0);
+/// The rule over a business's buttons, on each bubble.
+const RULE_IN: Color = Color::Rgb(0x3A, 0x3D, 0x3E);
+const RULE_OUT: Color = Color::Rgb(0x2B, 0x60, 0x4B);
+const LINK_ICON: &str = "\u{f08e}";
+const REPLY_ICON: &str = "\u{f112}";
+const CALL_ICON: &str = "\u{f095}";
+const COPY_ICON: &str = "\u{f0c5}";
+const LIST_ICON: &str = "\u{f03a}";
 /// WhatsApp's red, for a business that's closed.
 const CLOSED: Color = Color::Rgb(0xF1, 0x5C, 0x6D);
 
@@ -87,6 +98,9 @@ pub(crate) enum Deco {
     Ticks(u8, Color),
     /// An audio's button over two cells: ▶, or ⏸ when true.
     Play(bool, Color),
+    /// Half a row of a box, across that many cells, its two corners round:
+    /// the upper half (the box ends there) when true, else the lower one.
+    Edge(bool, u16, Color),
 }
 
 const TL: u8 = 1;
@@ -112,6 +126,7 @@ fn deco_image(d: Deco, w: u32, h: u32) -> DynamicImage {
     let (color, cover): ([u8; 3], Box<dyn Fn(f32, f32) -> f32>) = match d {
         Deco::Ticks(s, c) => return crate::ticks::picture(s, rgb(c), w * crate::ticks::CELLS as u32, h),
         Deco::Play(pause, c) => return play_picture(pause, rgb(c), w * 2, h),
+        Deco::Edge(upper, cols, c) => return edge_picture(upper, rgb(c), w * cols as u32, h),
         Deco::Corners(mask, c) => {
             // As round as WhatsApp's 7.5px, within one cell.
             let tall = (mask & (TL | BL) == TL | BL) || (mask & (TR | BR) == TR | BR);
@@ -162,6 +177,66 @@ fn deco_image(d: Deco, w: u32, h: u32) -> DynamicImage {
     DynamicImage::ImageRgba8(img)
 }
 
+/// Half a row filled, the upper or the lower half, its ends rounded as the
+/// cells' corners are.
+fn edge_picture(upper: bool, color: [u8; 3], w: u32, h: u32) -> DynamicImage {
+    let (wf, hh) = (w as f32, h as f32 / 2.0);
+    let r = hh.min(wf / 2.0);
+    let mut img = RgbaImage::new(w, h);
+    for (x, y, p) in img.enumerate_pixels_mut() {
+        let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+        // How far into the box from where it ends, mid-row.
+        let depth = if upper { hh - py } else { py - hh };
+        let cx = px.clamp(r, wf - r);
+        let a = if depth >= r || cx == px {
+            (depth + 0.5).clamp(0.0, 1.0)
+        } else {
+            let d = ((px - cx).powi(2) + (depth - r).powi(2)).sqrt();
+            (r - d + 0.5).clamp(0.0, 1.0)
+        };
+        *p = Rgba([color[0], color[1], color[2], (255.0 * a) as u8]);
+    }
+    DynamicImage::ImageRgba8(img)
+}
+
+/// A pill over three rows of `h`, from the middle of the first to the
+/// middle of the last, its ends half circles.
+fn field_picture(color: [u8; 3], w: u32, h: u32) -> RgbaImage {
+    let (wf, hf) = (w as f32, h as f32);
+    let r = hf.min(wf / 2.0);
+    let mut img = RgbaImage::new(w, h * 3);
+    for (x, y, p) in img.enumerate_pixels_mut() {
+        let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+        // How far from its spine, a segment across the middle row.
+        let cx = px.clamp(r, wf - r);
+        let d = ((px - cx).powi(2) + (py - hf * 1.5).powi(2)).sqrt();
+        *p = Rgba([color[0], color[1], color[2], (255.0 * (r - d + 0.5).clamp(0.0, 1.0)) as u8]);
+    }
+    img
+}
+
+/// The search field's pill with pictures, `cols` cells from `x`: the half
+/// rows over and under its text's row `y`, and the `cap` cells of each round
+/// end in that row; the text's own cells fill the rest in its color.
+fn draw_tall_field(f: &mut Frame, app: &mut App, x: u16, y: u16, cols: u16, cap: u16) {
+    let (Some((w, h)), Some(picker)) = (cell_px(app), app.picker.as_ref()) else { return };
+    if y == 0 || cols < 2 * cap {
+        return;
+    }
+    // (row of the picture, first cell, cells across, row on screen).
+    let pieces = [(0u32, 0u16, cols, y - 1), (1, 0, cap, y), (1, cols - cap, cap, y), (2, 0, cols, y + 1)];
+    for (row, col, n, at) in pieces {
+        let key = (format!("field-{row}-{col}-{cols}-{:?}", rgb(FIELD)), n, 1);
+        if !app.protocols.contains_key(&key) {
+            let pill = field_picture(rgb(FIELD), cols as u32 * w, h);
+            let piece = image::imageops::crop_imm(&pill, col as u32 * w, row * h, n as u32 * w, h).to_image();
+            let Ok(p) = picker.new_protocol(DynamicImage::ImageRgba8(piece), Rect::new(0, 0, n, 1).into(), Resize::Fit(None)) else { continue };
+            app.protocols.insert(key.clone(), p);
+        }
+        f.render_widget(Image::new(&app.protocols[&key]), Rect::new(x + col, at, n, 1));
+    }
+}
+
 /// WhatsApp's play triangle, or the two bars of pause, half a row tall.
 fn play_picture(pause: bool, color: [u8; 3], w: u32, h: u32) -> DynamicImage {
     let (wf, hf) = (w as f32, h as f32);
@@ -185,6 +260,49 @@ fn play_picture(pause: bool, color: [u8; 3], w: u32, h: u32) -> DynamicImage {
     DynamicImage::ImageRgba8(img)
 }
 
+/// The button down to the newest message, as WhatsApp Web's: a round
+/// one with a chevron, over `r`. False without pictures.
+fn draw_newest_btn(f: &mut Frame, app: &mut App, r: Rect) -> bool {
+    let (Some((w, h)), Some(picker)) = (cell_px(app), app.picker.as_ref()) else { return false };
+    let key = ("newest".to_string(), r.width, r.height);
+    if !app.protocols.contains_key(&key) {
+        let (pw, ph) = (w * r.width as u32, h * r.height as u32);
+        let (wf, hf) = (pw as f32, ph as f32);
+        let (cx, cy) = (wf / 2.0, hf / 2.0);
+        let rad = wf.min(hf) / 2.0 - 1.0;
+        // The chevron: two strokes meeting below the middle.
+        let (a, b, t) = (rad * 0.32, rad * 0.16, (rad * 0.075).max(1.0));
+        let seg = |px: f32, py: f32, x0: f32, y0: f32, x1: f32, y1: f32| {
+            let (dx, dy) = (x1 - x0, y1 - y0);
+            let k = (((px - x0) * dx + (py - y0) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
+            ((px - x0 - k * dx).powi(2) + (py - y0 - k * dy).powi(2)).sqrt()
+        };
+        let (bg, fg) = (rgb(RULE_IN), rgb(META_IN));
+        let mut img = RgbaImage::new(pw, ph);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+            let disc = (rad - ((px - cx).powi(2) + (py - cy).powi(2)).sqrt() + 0.5).clamp(0.0, 1.0);
+            let d = seg(px, py, cx - a, cy - b, cx, cy + b).min(seg(px, py, cx, cy + b, cx + a, cy - b));
+            let mark = (t - d + 0.5).clamp(0.0, 1.0);
+            let mix = |i: usize| (bg[i] as f32 + (fg[i] as f32 - bg[i] as f32) * mark) as u8;
+            *p = Rgba([mix(0), mix(1), mix(2), (255.0 * disc) as u8]);
+        }
+        let Ok(p) = picker.new_protocol(DynamicImage::ImageRgba8(img), Rect::new(0, 0, r.width, r.height).into(), Resize::Fit(None)) else {
+            return false;
+        };
+        app.protocols.insert(key.clone(), p);
+    }
+    // No text under it shows around the circle; the cells keep their
+    // background, a bubble's included.
+    for y in r.top()..r.bottom() {
+        for x in r.left()..r.right() {
+            f.buffer_mut()[(x, y)].set_symbol(" ");
+        }
+    }
+    f.render_widget(Image::new(&app.protocols[&key]), r);
+    true
+}
+
 pub(crate) fn draw_deco(f: &mut Frame, app: &mut App, d: Deco, x: u16, y: u16) {
     let (Some((w, h)), Some(picker)) = (cell_px(app), app.picker.as_ref()) else { return };
     let (key, cols) = match d {
@@ -192,6 +310,7 @@ pub(crate) fn draw_deco(f: &mut Frame, app: &mut App, d: Deco, x: u16, y: u16) {
         Deco::Tail(l, c) => (format!("tail-{l}-{:?}", rgb(c)), 1),
         Deco::Ticks(s, c) => (format!("ticks-{s}-{:?}", rgb(c)), crate::ticks::CELLS),
         Deco::Play(p, c) => (format!("play-{p}-{:?}", rgb(c)), 2),
+        Deco::Edge(u, n, c) => (format!("edge-{u}-{:?}", rgb(c)), n),
     };
     let key = (key, cols, 1);
     if !app.protocols.contains_key(&key) {
@@ -226,6 +345,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let cached = !app.chats.is_empty() && matches!(app.phase, Phase::Starting | Phase::Connecting);
     if app.phase == Phase::Ready || cached {
+        // The media viewer covers it all.
+        if crate::viewer::draw(f, app) {
+            return;
+        }
         return main_view(f, app, area);
     }
     match &app.phase {
@@ -322,7 +445,7 @@ pub(crate) fn draw_avatar(f: &mut Frame, app: &mut App, jid: &str, group: bool, 
 }
 
 fn main_view(f: &mut Frame, app: &mut App, area: Rect) {
-    let [body, status] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+    let body = area;
     let side_w = (body.width * 3 / 10).clamp(32, 48).min(body.width / 2);
     let [side, sep, conv] = Layout::horizontal([Constraint::Length(side_w), Constraint::Length(1), Constraint::Min(1)]).areas(body);
     // Your account at the foot of the chat list, as in slick.
@@ -340,6 +463,7 @@ fn main_view(f: &mut Frame, app: &mut App, area: Rect) {
     app.panel_maps = Rect::default();
     app.msg_links.clear();
     app.audio_hits.clear();
+    app.media_hits.clear();
     match app.profile.as_ref().map(|_| panel_width(conv.width)) {
         None => conversation(f, app, conv),
         Some(Some(pw)) => {
@@ -366,7 +490,7 @@ fn main_view(f: &mut Frame, app: &mut App, area: Rect) {
     for (r, url) in &app.msg_links {
         crate::links::osc8(f.buffer_mut(), *r, url, is_link);
     }
-    status_bar(f, app, status);
+    notice(f, app, conv);
 }
 
 /// The info panel's width: WhatsApp Web's share of the screen, while the
@@ -377,8 +501,15 @@ fn panel_width(total: u16) -> Option<u16> {
 }
 
 fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
-    // The search field, a pill across the column.
+    // The search field, a pill across the column. With pictures it's a row
+    // taller, half a row of it over the text and half under.
     let field_w = (area.width as usize).saturating_sub(4);
+    let tall = cell_px(app).filter(|&(w, h)| field_w + 2 >= 2 * h.div_ceil(w) as usize + 8);
+    // Each round end's cells in the text's row: a glyph, or a picture as
+    // wide as the pill is round (a row, from its middle to its edge).
+    let cap = tall.map_or(1, |(w, h)| h.div_ceil(w) as usize);
+    let lift = u16::from(tall.is_some());
+    let inside = (field_w + 2).saturating_sub(2 * cap);
     let searching = app.focus == Focus::Search;
     let (text, fg) = if app.search.is_empty() && !searching {
         ("Pesquisar ou começar uma nova conversa".to_string(), META_IN)
@@ -386,13 +517,14 @@ fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         (app.search.clone(), TEXT)
     };
     let icon_fg = if searching { GREEN } else { META_IN };
-    let text = truncate(&text, field_w.saturating_sub(4));
-    let pad = field_w.saturating_sub(3 + text.width());
-    let mut search = vec![Span::raw(" "), Span::styled(CAP_L, Style::new().fg(FIELD))];
+    let text = truncate(&text, inside.saturating_sub(4));
+    let pad = inside.saturating_sub(3 + text.width());
+    let end = |glyph| if tall.is_some() { Span::raw(" ".repeat(cap)) } else { Span::styled(glyph, Style::new().fg(FIELD)) };
+    let mut search = vec![Span::raw(" "), end(CAP_L)];
     search.push(Span::styled(format!("{SEARCH}  "), Style::new().fg(icon_fg).bg(FIELD)));
     search.push(Span::styled(text, Style::new().fg(fg).bg(FIELD)));
     search.push(Span::styled(" ".repeat(pad), Style::new().bg(FIELD)));
-    search.push(Span::styled(CAP_R, Style::new().fg(FIELD)));
+    search.push(end(CAP_R));
 
     // The chips: All, Unread, Favorites, Groups. Unread counts the list shown.
     let unread = app.chats.iter().filter(|c| c.unread > 0 && c.archived == app.archived).count();
@@ -412,22 +544,32 @@ fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         let text = if tight { label } else { format!(" {label} ") };
         let w = text.width() as u16 + 2;
         if x + w <= area.right() {
-            app.chips.push((Rect::new(x, area.y + 2, w, 1), filter));
+            app.chips.push((Rect::new(x, area.y + 2 + 2 * lift, w, 1), filter));
         }
         chip_spans.extend(pill(text, fg, bg));
         chip_spans.push(Span::raw(" "));
         x += w + 1;
     }
 
-    // The search field on top, then a blank row before the chips.
-    app.search_area = Rect::new(area.x + 1, area.y, field_w as u16, 1);
-    f.render_widget(Paragraph::new(vec![Line::from(search), Line::default(), Line::from(chip_spans)]), area);
+    // The search field on top, then a blank row before the chips; the tall
+    // field's rows above and below its text are pictures.
+    let text_y = area.y + lift;
+    app.search_area = Rect::new(area.x + 1, area.y, field_w as u16, 1 + 2 * lift);
+    let mut top = vec![Line::from(search), Line::default(), Line::from(chip_spans)];
+    if tall.is_some() {
+        top.insert(0, Line::default());
+        top.insert(2, Line::default());
+    }
+    f.render_widget(Paragraph::new(top), area);
+    if tall.is_some() {
+        draw_tall_field(f, app, area.x + 1, text_y, field_w as u16 + 2, cap as u16);
+    }
     if searching {
-        let x = area.x + 5 + app.search.width() as u16;
-        f.set_cursor_position(Position::new(x.min(area.right().saturating_sub(2)), area.y));
+        let x = area.x + 1 + cap as u16 + 3 + app.search.width() as u16;
+        f.set_cursor_position(Position::new(x.min(area.right().saturating_sub(1 + cap as u16)), text_y));
     }
 
-    let list = Rect { y: area.y + 4, height: area.height.saturating_sub(4), ..area };
+    let list = Rect { y: area.y + 4 + 2 * lift, height: area.height.saturating_sub(4 + 2 * lift), ..area };
     app.side_list = list;
     app.side_hits.clear();
     app.chat_menu.chevron = None;
@@ -541,12 +683,19 @@ fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
     f.render_widget(Paragraph::new(lines), inner);
-    // Its corner cells bare, the pictures round them.
+    // Pictures at hand: half a row of air above the lines and half below,
+    // as WhatsApp pads the selected chat. The row of air under it gives its
+    // upper half, the one over it (the chat above's) its lower half.
     if let Some((top, h)) = lit_at.filter(|_| app.picker.is_some() && width > 1) {
-        for (row, col, d) in box_corners(0, h as usize, 0, width, SELECTED, 0) {
-            let (x, y) = (inner.x + col as u16, top + row as u16);
-            f.buffer_mut()[(x, y)].set_bg(Color::Reset);
-            draw_deco(f, app, d, x, y);
+        let (x0, cols) = (inner.x, width as u16);
+        let blank = |f: &mut Frame, y: u16| (x0..x0 + cols).all(|x| f.buffer_mut()[(x, y)].symbol() == " ");
+        let below = top + h - 1;
+        for x in x0..x0 + cols {
+            f.buffer_mut()[(x, below)].set_bg(Color::Reset);
+        }
+        draw_deco(f, app, Deco::Edge(true, cols, SELECTED), x0, below);
+        if top > inner.y && blank(f, top - 1) {
+            draw_deco(f, app, Deco::Edge(false, cols, SELECTED), x0, top - 1);
         }
     }
     if let Some((w, _)) = cells {
@@ -759,7 +908,7 @@ fn conversation(f: &mut Frame, app: &mut App, area: Rect) {
                 Line::from("WhatsApp TUI").fg(GREEN).bold(),
                 Line::default(),
                 Line::from("Escolha uma conversa à esquerda").style(dim()),
-                Line::from("↑↓ navega · Enter abre · / busca").style(dim()),
+                Line::from("↑↓ navega · Enter abre · / busca · ? atalhos").style(dim()),
             ],
         );
     };
@@ -794,10 +943,13 @@ fn conversation(f: &mut Frame, app: &mut App, area: Rect) {
         None if name == number => Span::styled("clique para ver os dados do contato", Style::new().fg(META_IN)),
         None => Span::styled(number, Style::new().fg(META_IN)),
     };
+    // The check after the name, as WhatsApp Web marks itself and verified businesses.
+    let verified = jid == "0@s.whatsapp.net" || chat.as_ref().is_some_and(|c| c.verified);
+    let check = if verified { Span::styled(format!(" {CHECK}"), Style::new().fg(CHECK_BLUE)) } else { Span::raw("") };
     let pad = " ".repeat(indent as usize);
     f.render_widget(
         Paragraph::new(vec![
-            Line::from(vec![Span::raw(pad.clone()), Span::styled(name, Style::new().fg(TEXT).bold())]),
+            Line::from(vec![Span::raw(pad.clone()), Span::styled(name, Style::new().fg(TEXT).bold()), check]),
             Line::from(vec![Span::raw(pad), sub]),
             Line::from("─".repeat(header.width as usize)).style(dim()),
         ]),
@@ -812,7 +964,7 @@ fn conversation(f: &mut Frame, app: &mut App, area: Rect) {
     let msgs = app.msgs.get(&jid).unwrap_or(&empty);
     let loaded = app.msgs.contains_key(&jid);
     let now = app.player.now.as_ref().filter(|n| n.chat == jid);
-    let (lines, decos, starts, bigs, links, audios) = message_lines(msgs, msgs_area.width as usize, group, cell_px(app), now);
+    let (lines, decos, starts, bigs, links, audios, pics) = message_lines(msgs, msgs_area.width as usize, group, cell_px(app), now);
     let h = msgs_area.height as usize;
     // From a search result: that message in the middle of the screen.
     if let Some(id) = app.jump.clone().filter(|_| loaded) {
@@ -865,17 +1017,29 @@ fn conversation(f: &mut Frame, app: &mut App, area: Rect) {
             });
         }
     }
+    // Photos and videos only whole, as the big emojis.
+    for p in &pics {
+        if p.row >= start && p.row + p.h <= end && p.col + p.w <= msgs_area.width as usize {
+            let rect = Rect::new(msgs_area.x + p.col as u16, y_of(p.row), p.w as u16, p.h as u16);
+            crate::media::draw(f, app, p, rect);
+        }
+    }
     // Big emojis only whole: a terminal picture can't be cut.
     for (row, col, (w, eh), text) in bigs {
         if row >= start && row + eh as usize <= end {
             crate::bigemoji::draw(f, app, &text, Rect::new(msgs_area.x + col as u16, msgs_area.y + top_pad + (row - start) as u16, w, eh));
         }
     }
+    // Scrolled up: WhatsApp Web's round button with a chevron, down to the newest.
+    app.newest_btn = Rect::default();
     if app.scroll > 0 {
-        let label = " ↓ mais recentes ";
-        let w = label.width() as u16 + 2;
-        let r = Rect { x: msgs_area.right().saturating_sub(w + 2), y: msgs_area.bottom().saturating_sub(1), width: w, height: 1 };
-        f.render_widget(Paragraph::new(Line::from(pill(label.into(), Color::Black, GREEN))), r);
+        let r = Rect { x: msgs_area.right().saturating_sub(6), y: msgs_area.bottom().saturating_sub(3), width: 4, height: 2 };
+        if !draw_newest_btn(f, app, r) {
+            let label = format!(" {DOWN} ");
+            let r = Rect { y: r.y + 1, width: label.width() as u16 + 2, height: 1, ..r };
+            f.render_widget(Paragraph::new(Line::from(pill(label, META_IN, RULE_IN))), r);
+        }
+        app.newest_btn = r;
     }
 
     if read_only.is_empty() {
@@ -1013,8 +1177,8 @@ pub(crate) fn caret_pos(s: &str, caret: usize, width: usize) -> (usize, usize) {
 /// one sender's messages has WhatsApp's tail, on its side: the returned
 /// (row, col, deco) say where those pictures go. A message of only emojis
 /// goes without a bubble, big, as (row, col, size, text).
-/// Then the links' pieces, a row each, as (row, col, width, url); last,
-/// the audio players.
+/// Then the links' pieces, a row each, as (row, col, width, url); then
+/// the audio players; last, the photos and videos.
 type Bubbles = (
     Vec<Line<'static>>,
     Vec<(usize, usize, Deco)>,
@@ -1022,6 +1186,7 @@ type Bubbles = (
     Vec<(usize, usize, (u16, u16), String)>,
     Vec<(usize, usize, usize, String)>,
     Vec<AudioSpot>,
+    Vec<crate::media::PicSpot>,
 );
 
 /// An audio bubble's player: its first row and where its icon, button and
@@ -1112,12 +1277,15 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, cell: Option<(u32, u32
     let mut bigs = Vec::new();
     let mut link_cells = Vec::new();
     let mut audios = Vec::new();
+    let mut pics = Vec::new();
     let rounded = cell.is_some();
     if width < 16 {
-        return (out, decos, starts, bigs, link_cells, audios);
+        return (out, decos, starts, bigs, link_cells, audios, pics);
     }
     let outer = (width * 3 / 4).clamp(16, 90).min(width - 4);
-    let inner = outer - 2;
+    // A cell of air on the left, two on the right, where the text would
+    // otherwise run into the edge.
+    let inner = outer - 3;
     let mut prev_day = None;
     let mut prev_sender: Option<&str> = None;
     for m in msgs {
@@ -1182,13 +1350,28 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, cell: Option<(u32, u32
             q.extend(crate::markup::line(&m.quote, inner.saturating_sub(2), meta.add_modifier(Modifier::ITALIC)));
             rows.push(q);
         }
+        // A photo or video across the bubble, blank rows its picture goes
+        // over; the text under it wraps to its width, as WhatsApp does.
+        let media = cell.and_then(|c| crate::media::shown(m).map(|md| (md, crate::media::cells(md, c, inner + 1))));
+        let wrap = media.map_or(inner, |(_, (pw, _))| pw - 1);
+        let pic_row = rows.len();
+        if let Some((_, (_, ph))) = media {
+            rows.extend((0..ph).map(|_| Vec::new()));
+        }
+        let card = m.card.as_ref();
+        if let Some(title) = card.map(|c| c.title.as_str()).filter(|t| !t.is_empty()) {
+            rows.extend(wrap_rows(title, wrap, body.add_modifier(Modifier::BOLD)));
+        }
+        let text = if media.is_some() { crate::media::caption(m) } else { m.text.as_str() };
         // Links underlined in their color, on every row they wrap onto.
         let link = Style::new().fg(if m.from_me { LINK_OUT } else { LINK_IN }).bg(bg).add_modifier(Modifier::UNDERLINED);
         let mut pieces = Vec::new();
         // An audio is a player, not its text.
         let audio = audio_of(m);
         let mut player = None;
-        let n_text = if let Some(a) = &audio {
+        let n_text = if media.is_some() && text.is_empty() {
+            0
+        } else if let Some(a) = &audio {
             let now = now.filter(|n| n.id == m.id);
             let (r, icon_w, track, track_w) = audio_rows(a, now, m.from_me, bg, meta_fg, cell, inner);
             let state = now.map(|n| n.state);
@@ -1200,12 +1383,23 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, cell: Option<(u32, u32
         } else {
             // WhatsApp's formatting, its markers hidden: the rows' widths are what's shown.
             let looks = crate::markup::Looks { base: body, link, shade: if m.from_me { CODE_OUT } else { CODE_IN }, dim: meta_fg };
-            let (text, found) = crate::markup::rows(&m.text, inner, &looks);
+            let (text, found) = crate::markup::rows(text, wrap, &looks);
             pieces.extend(found.into_iter().map(|(r, c, w, url)| (rows.len() + r, c, w, url)));
             let n_text = text.len();
             rows.extend(text);
             n_text
         };
+        // A business's footer, dim under the text; the time can follow it.
+        let mut n_text = n_text;
+        if let Some(foot) = card.map(|c| c.footer.as_str()).filter(|t| !t.is_empty()) {
+            let r = wrap_rows(foot, wrap, meta);
+            n_text += r.len();
+            rows.extend(r);
+        }
+        // Its buttons, each under a rule, centered: an icon and the label.
+        let buttons: Vec<(String, String)> = card
+            .map(|c| c.buttons.iter().map(|b| (truncate(&format!("{} {}", button_icon(&b.kind, &b.url), b.text), inner), b.url.clone())).collect())
+            .unwrap_or_default();
 
         let mut footer = vec![Span::styled(t.format("%H:%M").to_string(), meta)];
         let (tick_text, tick_color) = ticks(m.status);
@@ -1220,14 +1414,16 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, cell: Option<(u32, u32
 
         // The time goes at the end of the last line when it fits, as WhatsApp does.
         let last_w = rows.last().map_or(0, |r| row_width(r));
-        let inline = n_text > 0 && last_w + 2 + footer_w <= inner;
+        let inline = n_text > 0 && last_w + 2 + footer_w <= wrap;
         let content_w = rows
             .iter()
             .map(|r| row_width(r))
             .chain([if inline { last_w + 2 + footer_w } else { footer_w }])
+            .chain(media.map(|(_, (pw, _))| pw - 1))
+            .chain(buttons.iter().map(|(b, _)| b.width()))
             .max()
             .unwrap_or(0);
-        let bw = content_w + 2;
+        let bw = content_w + 3;
         // A column kept free on the tail's side.
         let x = if m.from_me { width.saturating_sub(bw + 2) } else { 2 };
         if !inline {
@@ -1239,6 +1435,16 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, cell: Option<(u32, u32
         let footer_row = rows.len() - 1;
         if audio.is_some() {
             rows.push(Vec::new());
+        }
+        let rule = Style::new().fg(if m.from_me { RULE_OUT } else { RULE_IN }).bg(bg);
+        let button = Style::new().fg(GREEN).bg(bg);
+        for (label, url) in &buttons {
+            rows.push(vec![Span::styled("─".repeat(content_w), rule)]);
+            let left = (content_w - label.width()) / 2;
+            if !url.is_empty() {
+                pieces.push((rows.len(), 0, content_w, url.clone()));
+            }
+            rows.push(vec![Span::styled(" ".repeat(left), body), Span::styled(label.clone(), button)]);
         }
         let top = out.len();
         starts.push((m.id.clone(), top));
@@ -1262,6 +1468,7 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, cell: Option<(u32, u32
                 r.push(Span::styled(" ".repeat(content_w - used), body));
             }
             spans.extend(r);
+            spans.push(Span::styled(" ", body));
             spans.push(Span::styled(" ", edge(i, false)));
             out.push(Line::from(spans));
         }
@@ -1274,7 +1481,7 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, cell: Option<(u32, u32
             };
             decos.extend(box_corners(top, n, x, bw, bg, square));
             if m.from_me {
-                decos.push((top + n - 1, x + 1 + content_w - crate::ticks::CELLS as usize, Deco::Ticks(m.status, tick_color)));
+                decos.push((top + footer_row, x + 1 + content_w - crate::ticks::CELLS as usize, Deco::Ticks(m.status, tick_color)));
             }
             if first {
                 let col = if m.from_me { x + bw } else { x - 1 };
@@ -1282,6 +1489,11 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, cell: Option<(u32, u32
             }
         }
         link_cells.extend(pieces.into_iter().map(|(r, c, w, url)| (top + r, x + 1 + c, w, url)));
+        if let Some((md, (pw, ph))) = media {
+            // Centered when the bubble's wider than it (a long name over it).
+            let col = x + 1 + (content_w + 1).saturating_sub(pw) / 2;
+            pics.push(crate::media::PicSpot::new(m, md, top + pic_row, col, (pw, ph)));
+        }
         if let (Some(a), Some((row, icon_w, track, track_w, state))) = (audio, player) {
             let col = x + 2;
             // The button's a picture, but for the spinner while it downloads.
@@ -1304,7 +1516,7 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, cell: Option<(u32, u32
         }
         prev_sender = Some(m.sender.as_str());
     }
-    (out, decos, starts, bigs, link_cells, audios)
+    (out, decos, starts, bigs, link_cells, audios, pics)
 }
 
 /// What's drawn over the panel's text: the big picture, or a member's.
@@ -1704,29 +1916,38 @@ fn draw_headphones(f: &mut Frame, app: &mut App, rect: Rect) {
     f.render_widget(Image::new(&app.protocols[&key]), rect);
 }
 
+/// Plain text wrapped to `width`, a row of spans each.
+fn wrap_rows(text: &str, width: usize, style: Style) -> Vec<Vec<Span<'static>>> {
+    wrap(text, width).into_iter().map(|l| vec![Span::styled(l, style)]).collect()
+}
+
+/// A business button's icon: a link opens, the rest only show what they are.
+fn button_icon(kind: &str, url: &str) -> &'static str {
+    match kind {
+        _ if !url.is_empty() => LINK_ICON,
+        "call" => CALL_ICON,
+        "copy" => COPY_ICON,
+        "list" => LIST_ICON,
+        _ => REPLY_ICON,
+    }
+}
+
 fn row_width(r: &[Span]) -> usize {
     r.iter().map(|s| s.content.width()).sum()
 }
 
-fn status_bar(f: &mut Frame, app: &App, area: Rect) {
-    if let Some((text, _)) = &app.notice {
-        return f.render_widget(Paragraph::new(format!(" {text}")).red(), area);
-    }
-    let (send, newline) = if app.settings.on(crate::config::ENTER_SENDS) { ("Enter", "Alt+Enter") } else { ("Alt+Enter", "Enter") };
-    let hints: String = match app.focus {
-        _ if app.account.menu.is_some() || app.account.settings.is_some() || app.chat_menu.popup.is_some() => " ↑↓ move · Enter escolhe · Esc fecha".into(),
-        _ if app.account.about => " Enter abre o link · Esc fecha".into(),
-        _ if app.account.profile.is_some() => " Esc fecha".into(),
-        Focus::Input if app.emoji_panel.open => " digite para buscar · ←↑↓→ escolhe · Enter insere · Tab categorias · Esc fecha".into(),
-        Focus::Sidebar if app.archived => " ↑↓ conversas · Enter abre · m opções · Esc volta · / busca · 1 2 3 4 filtros · i dados · Tab mensagem · q sai".into(),
-        Focus::Sidebar => " ↑↓ conversas · Enter abre · m opções · / busca ou número · 1 2 3 4 filtros · i dados · Espaço áudio · Tab mensagem · Alt+S menu · q sai".into(),
-        Focus::Search => " digite para filtrar · ↑↓ escolhe · Enter abre · Esc limpa".into(),
-        Focus::Input => format!(" {send} envia · {newline} quebra linha · Alt+E emojis · Alt+A anexa · Ctrl+B negrito · Ctrl+I itálico · Ctrl+V cola · PgUp/PgDn rola · Esc conversas · Alt+S menu · Ctrl+C sai"),
-    };
-    f.render_widget(Paragraph::new(hints).style(dim()), area);
+/// A note or an error for a few seconds, over the row of margin under the
+/// message box (or the foot of that side): no row of its own, so nothing
+/// moves when it comes and goes. The keys are in "Atalhos de teclado".
+fn notice(f: &mut Frame, app: &App, conv: Rect) {
+    let Some((text, _)) = &app.notice else { return };
+    let r = if app.input_area.width > 0 { app.input_area } else { conv };
+    let row = Rect { y: r.bottom().saturating_sub(1), height: 1, ..r };
+    let text = truncate(text, row.width.saturating_sub(2) as usize);
+    f.render_widget(Paragraph::new(text).red().alignment(Alignment::Center), row);
 }
 
-fn local(ts: i64) -> DateTime<Local> {
+pub(crate) fn local(ts: i64) -> DateTime<Local> {
     Local.timestamp_opt(ts, 0).single().unwrap_or_else(Local::now)
 }
 
@@ -1744,7 +1965,7 @@ fn short_time(ts: i64) -> String {
     }
 }
 
-fn day_label(t: DateTime<Local>) -> String {
+pub(crate) fn day_label(t: DateTime<Local>) -> String {
     let days = (Local::now().date_naive() - t.date_naive()).num_days();
     match days {
         0 => "Hoje".into(),

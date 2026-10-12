@@ -36,6 +36,7 @@ enum Item {
     Notifications,
     Profile,
     Settings,
+    Shortcuts,
     /// "Procurar atualizações"; with one installed, "Reinicie para atualizar".
     CheckUpdate,
     About,
@@ -48,8 +49,17 @@ enum Item {
     PauseWeek,
 }
 
-const MAIN: [Item; 8] =
-    [Item::Notifications, Item::Sep, Item::Profile, Item::Settings, Item::Sep, Item::CheckUpdate, Item::About, Item::Logout];
+const MAIN: [Item; 9] = [
+    Item::Notifications,
+    Item::Sep,
+    Item::Profile,
+    Item::Settings,
+    Item::Shortcuts,
+    Item::Sep,
+    Item::CheckUpdate,
+    Item::About,
+    Item::Logout,
+];
 
 impl Item {
     fn in_sub(self) -> bool {
@@ -70,6 +80,8 @@ pub struct Account {
     pub menu: Option<Popup>,
     /// The settings dialog, open, with its selected row in `config::opts()`.
     pub settings: Option<usize>,
+    /// "Atalhos de teclado", open, scrolled down that many rows.
+    pub shortcuts: Option<u16>,
     pub about: bool,
     /// "Perfil", open; what the bridge says about you once it answers.
     pub profile: Option<Option<Profile>>,
@@ -87,6 +99,8 @@ pub struct Account {
     sub_area: Rect,
     rows: Vec<(Rect, Item)>,
     dialog: Rect,
+    /// The shortcuts' rows on screen, a page of them.
+    pub(crate) shortcuts_page: u16,
     settings_rows: Vec<(Rect, usize)>,
     link: Rect,
 }
@@ -94,7 +108,7 @@ pub struct Account {
 impl Account {
     /// Something of it is on screen: it takes every key and click.
     fn open(&self) -> bool {
-        self.menu.is_some() || self.settings.is_some() || self.about || self.profile.is_some()
+        self.menu.is_some() || self.settings.is_some() || self.shortcuts.is_some() || self.about || self.profile.is_some()
     }
 }
 
@@ -196,6 +210,16 @@ impl App {
         self.account.menu = Some(Popup { sel: Item::Notifications, sub: None, confirm: false });
     }
 
+    /// "Atalhos de teclado", over whatever else was open.
+    pub fn open_shortcuts(&mut self) {
+        self.attach.menu = None;
+        self.emoji_panel.open = false;
+        self.chat_menu.popup = None;
+        let a = &mut self.account;
+        (a.menu, a.settings, a.about, a.profile) = (None, None, false, None);
+        a.shortcuts = Some(0);
+    }
+
     fn choose(&mut self, item: Item) {
         let mut close = true;
         match item {
@@ -209,6 +233,7 @@ impl App {
             }
             Item::Profile => self.open_my_profile(),
             Item::Settings => self.account.settings = Some(0),
+            Item::Shortcuts => self.account.shortcuts = Some(0),
             Item::CheckUpdate => self.check_updates(),
             Item::About => self.account.about = true,
             Item::Logout => {
@@ -247,6 +272,7 @@ impl App {
         self.archived = false;
         self.chat_menu.popup = None;
         self.profile = None;
+        self.close_viewer();
         self.avatars.clear();
         self.events.forget();
         self.clear_drafts();
@@ -356,6 +382,14 @@ impl App {
             self.restart();
             return true;
         }
+        // Ctrl+/, WhatsApp Web's, opens or closes the shortcuts from anywhere;
+        // without the kitty protocol the terminal sends it as Ctrl+7.
+        if k.modifiers.contains(KeyModifiers::CONTROL) && matches!(k.code, KeyCode::Char('/' | '7')) {
+            if self.account.shortcuts.take().is_none() {
+                self.open_shortcuts();
+            }
+            return true;
+        }
         if !self.account.open() {
             if alt_s {
                 self.open_account_menu();
@@ -372,6 +406,19 @@ impl App {
                 KeyCode::Esc | KeyCode::Char('q') => self.account.about = false,
                 _ => {}
             }
+        } else if let Some(top) = self.account.shortcuts {
+            // Scrolled past the end comes back when drawn.
+            let page = self.account.shortcuts_page.max(1);
+            self.account.shortcuts = match k.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q' | '?') => None,
+                KeyCode::Up | KeyCode::Char('k') => Some(top.saturating_sub(1)),
+                KeyCode::Down | KeyCode::Char('j') => Some(top + 1),
+                KeyCode::PageUp => Some(top.saturating_sub(page)),
+                KeyCode::PageDown | KeyCode::Char(' ') => Some(top + page),
+                KeyCode::Home | KeyCode::Char('g') => Some(0),
+                KeyCode::End | KeyCode::Char('G') => Some(u16::MAX),
+                _ => Some(top),
+            };
         } else if let Some(sel) = self.account.settings {
             let all = config::opts();
             let n = all.len();
@@ -440,6 +487,15 @@ impl App {
                 crate::links::open(&format!("https://{REPO}"));
             } else if down && outside {
                 self.account.about = false;
+            }
+            return true;
+        }
+        if let Some(top) = a.shortcuts {
+            match m.kind {
+                MouseEventKind::ScrollUp => self.account.shortcuts = Some(top.saturating_sub(3)),
+                MouseEventKind::ScrollDown => self.account.shortcuts = Some(top + 3),
+                _ if down && outside => self.account.shortcuts = None,
+                _ => {}
             }
             return true;
         }
@@ -558,6 +614,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.account.settings.is_some() {
         draw_settings(f, app);
     }
+    if app.account.shortcuts.is_some() {
+        crate::shortcuts::draw(f, app);
+    }
     if app.account.about {
         draw_about(f, app);
     }
@@ -618,6 +677,7 @@ fn draw_menu(f: &mut Frame, app: &mut App) {
             }
             Item::Profile => padded("Perfil", "", iw),
             Item::Settings => padded("Configurações", "", iw),
+            Item::Shortcuts => padded("Atalhos de teclado", "Ctrl+/", iw),
             Item::CheckUpdate if matches!(app.account.update, Some(State::Installed(_))) => padded("Reinicie para atualizar", "↻", iw),
             Item::CheckUpdate => padded("Procurar atualizações", "", iw),
             Item::About => padded("Sobre o WhatsApp TUI", "", iw),
@@ -674,7 +734,7 @@ fn draw_sub(f: &mut Frame, app: &mut App, main: Rect, y: u16, sel: Item) {
 
 /// A rounded box in the middle of the screen, cleared, with its title; it
 /// and the space inside, a column in from each side.
-fn dialog(f: &mut Frame, app: &mut App, w: u16, h: u16, title: &str) -> (Rect, Rect) {
+pub(crate) fn dialog(f: &mut Frame, app: &mut App, w: u16, h: u16, title: &str) -> (Rect, Rect) {
     let area = f.area();
     let (w, h) = (w.min(area.width), h.min(area.height));
     let rect = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h);

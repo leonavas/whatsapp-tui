@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -30,6 +31,16 @@ type Media struct {
 	Seconds uint32 `json:"seconds,omitempty"`
 	// A voice note, recorded in the app, rather than an audio file.
 	PTT bool `json:"ptt,omitempty"`
+	// A photo's or video's size, and a JPEG of it on disk to show until
+	// (for a video, in place of) the file: the one its message carries, or
+	// a frame of the video once that's here.
+	Width  uint32 `json:"width,omitempty"`
+	Height uint32 `json:"height,omitempty"`
+	Thumb  string `json:"thumb,omitempty"`
+	// A GIF: a video that loops, without sound.
+	GIF bool `json:"gif,omitempty"`
+	// The file, once it's in the cache.
+	File string `json:"file,omitempty"`
 }
 
 const unavailable = "Mídia indisponível"
@@ -37,10 +48,14 @@ const unavailable = "Mídia indisponível"
 // mediaOf finds the downloadable part of a message: what it is, and a
 // message with only that part, to keep for downloading it later.
 func mediaOf(m *waE2E.Message) (*Media, *waE2E.Message) {
+	// A business's card: the photo or video at its top.
+	if c := cardOf(m); c != nil && c.header != nil {
+		m = c.header
+	}
 	switch {
 	case m.GetAudioMessage() != nil:
 		x := m.GetAudioMessage()
-		return &Media{"audio", x.GetMimetype(), x.GetSeconds(), x.GetPTT()}, &waE2E.Message{AudioMessage: x}
+		return &Media{Kind: "audio", Mime: x.GetMimetype(), Seconds: x.GetSeconds(), PTT: x.GetPTT()}, &waE2E.Message{AudioMessage: x}
 	case m.GetImageMessage() != nil:
 		x := m.GetImageMessage()
 		return &Media{Kind: "image", Mime: x.GetMimetype()}, &waE2E.Message{ImageMessage: x}
@@ -55,6 +70,59 @@ func mediaOf(m *waE2E.Message) (*Media, *waE2E.Message) {
 		return &Media{Kind: "sticker", Mime: x.GetMimetype()}, &waE2E.Message{StickerMessage: x}
 	}
 	return nil, nil
+}
+
+func partOf(blob []byte) *waE2E.Message {
+	part := &waE2E.Message{}
+	if blob == nil || proto.Unmarshal(blob, part) != nil {
+		return nil
+	}
+	return part
+}
+
+// picture fills in what a photo's or video's bubble shows before it's
+// downloaded; the thumbnail its message carries goes to disk once.
+func (md *Media) picture(chat, id string, part *waE2E.Message) {
+	path := mediaFile(chat, id, md.Mime)
+	if st, err := os.Stat(path); err == nil && st.Size() > 0 {
+		md.File = path
+	}
+	var thumb []byte
+	switch {
+	case part.GetImageMessage() != nil:
+		x := part.GetImageMessage()
+		md.Width, md.Height, thumb = x.GetWidth(), x.GetHeight(), x.GetJPEGThumbnail()
+	case part.GetVideoMessage() != nil:
+		x := part.GetVideoMessage()
+		md.Width, md.Height, thumb, md.GIF = x.GetWidth(), x.GetHeight(), x.GetJPEGThumbnail(), x.GetGifPlayback()
+		if _, err := os.Stat(path + ".frame.jpg"); err == nil {
+			md.Thumb = path + ".frame.jpg"
+			return
+		}
+	default:
+		return
+	}
+	t := path + ".thumb.jpg"
+	if _, err := os.Stat(t); err == nil || (len(thumb) > 0 && writeFile(t, thumb) == nil) {
+		md.Thumb = t
+	}
+}
+
+// poster puts a sharper picture of a downloaded video in its bubble than
+// the small one its message carries: a frame, through ffmpeg when it's there.
+func poster(chat, id, path string) {
+	out := path + ".frame.jpg"
+	if _, err := os.Stat(out); err == nil {
+		return
+	}
+	tmp := out + ".tmp"
+	err := exec.Command("ffmpeg", "-v", "error", "-y", "-i", path, "-vf", "thumbnail=30,scale='min(720,iw)':-2",
+		"-frames:v", "1", "-f", "mjpeg", tmp).Run()
+	if err != nil || os.Rename(tmp, out) != nil {
+		os.Remove(tmp)
+		return
+	}
+	emit(map[string]any{"t": "thumb", "chat": chat, "id": id, "path": out})
 }
 
 func downloadable(m *waE2E.Message) whatsmeow.DownloadableMessage {
@@ -106,7 +174,7 @@ func (b *Bridge) storeMedia(chat, id string, md *Media, part *waE2E.Message, waC
 				if m := b.load(chat, id); m != nil {
 					emit(map[string]any{"t": "message", "msg": m})
 				}
-				b.download(chat, id)
+				b.download(chat, id, false)
 			}()
 		}
 	}()
@@ -207,41 +275,56 @@ func mediaFailed(chat, id, why string) {
 }
 
 // download fetches a message's media into the cache, once; the answer is a
-// `media` event with the file, or with why not.
-func (b *Bridge) download(chat, id string) {
+// `media` event with the file, or with why not. An `auto` one (a photo
+// on screen) gives up quietly where the phone would have to be asked.
+func (b *Bridge) download(chat, id string, auto bool) {
 	key := chat + "\x00" + id
 	if _, busy := inFlight.LoadOrStore(key, true); busy {
 		return
 	}
 	defer inFlight.Delete(key)
-	var mimeType, waChat, waSender, sender string
+	var mimeType, kind, waChat, waSender, sender string
 	var blob []byte
 	var fromMe bool
 	var ts int64
-	err := b.db.QueryRow(`SELECT COALESCE(mime, ''), proto, COALESCE(wa_chat, ''), COALESCE(wa_sender, ''), sender, from_me, ts
+	err := b.db.QueryRow(`SELECT COALESCE(mime, ''), COALESCE(kind, ''), proto, COALESCE(media.wa_chat, ''), COALESCE(media.wa_sender, ''), sender, from_me, ts
 		FROM messages LEFT JOIN media USING (chat, id) WHERE chat = ? AND id = ?`, chat, id).
-		Scan(&mimeType, &blob, &waChat, &waSender, &sender, &fromMe, &ts)
+		Scan(&mimeType, &kind, &blob, &waChat, &waSender, &sender, &fromMe, &ts)
 	if err != nil {
-		mediaFailed(chat, id, unavailable)
+		if !auto {
+			logf("download %s %s: not stored: %v", chat, id, err)
+			mediaFailed(chat, id, unavailable)
+		}
 		return
 	}
 	path := mediaFile(chat, id, mimeType)
-	if st, err := os.Stat(path); mimeType != "" && err == nil && st.Size() > 0 {
+	done := func() {
 		mediaDone(chat, id, path)
+		if kind == "video" {
+			poster(chat, id, path)
+		}
+	}
+	if st, err := os.Stat(path); mimeType != "" && err == nil && st.Size() > 0 {
+		done()
 		return
 	}
 	part := &waE2E.Message{}
 	if blob == nil || proto.Unmarshal(blob, part) != nil || downloadable(part) == nil {
 		// Stored before the keys were kept: the phone has them.
-		b.recoverMedia(chat, id, sender, ts)
+		if !auto {
+			b.recoverMedia(chat, id, sender, ts)
+		}
 		return
 	}
 	err = b.fetch(part, path)
 	switch {
 	case err == nil:
-		mediaDone(chat, id, path)
+		done()
+	case auto:
+		logf("download %s (auto): %v", id, err)
 	case errors.Is(err, whatsmeow.ErrMediaDownloadFailedWith404) || errors.Is(err, whatsmeow.ErrMediaDownloadFailedWith410):
 		// Expired on the server: the phone, if it still has it, uploads it again.
+		logf("download %s %s: expired (%v), asking the phone", chat, id, err)
 		if b.askReupload(chat, id, path, part, waChat, waSender, fromMe) != nil {
 			mediaFailed(chat, id, unavailable)
 		}
@@ -254,7 +337,16 @@ func (b *Bridge) download(chat, id string) {
 func (b *Bridge) fetch(part *waE2E.Message, path string) error {
 	ctx, cancel := context.WithTimeout(b.ctx, 2*time.Minute)
 	defer cancel()
-	data, err := b.cli.Download(ctx, downloadable(part))
+	dl := downloadable(part)
+	var data []byte
+	var err error
+	// WhatsApp's own announcements (the official account) carry no path,
+	// only a public static URL, still encrypted with the message's key.
+	if st, ok := dl.(interface{ GetStaticURL() string }); ok && dl.GetDirectPath() == "" && st.GetStaticURL() != "" {
+		data, err = b.cli.DangerousInternals().DownloadAndDecrypt(ctx, st.GetStaticURL(), dl.GetMediaKey(), whatsmeow.GetMediaType(dl), dl.GetFileEncSHA256(), dl.GetFileSHA256())
+	} else {
+		data, err = b.cli.Download(ctx, dl)
+	}
 	if err != nil {
 		return err
 	}
@@ -281,6 +373,7 @@ func (b *Bridge) askReupload(chat, id, path string, part *waE2E.Message, waChat,
 	// The phone may be off, or no longer have it.
 	time.AfterFunc(30*time.Second, func() {
 		if _, ok := takeReupload(id); ok {
+			logf("media retry %s: no answer from the phone", id)
 			mediaFailed(chat, id, unavailable)
 		}
 	})
@@ -303,6 +396,7 @@ func (b *Bridge) mediaRetry(e *events.MediaRetry) {
 	}
 	n, err := whatsmeow.DecryptMediaRetryNotification(e, downloadable(r.part).GetMediaKey())
 	if err != nil || n.GetResult() != waMmsRetry.MediaRetryNotification_SUCCESS || n.GetDirectPath() == "" {
+		logf("media retry %s: %v, result %v", r.id, err, n.GetResult())
 		mediaFailed(r.chat, r.id, unavailable)
 		return
 	}
@@ -316,6 +410,9 @@ func (b *Bridge) mediaRetry(e *events.MediaRetry) {
 		return
 	}
 	mediaDone(r.chat, r.id, r.path)
+	if r.part.GetVideoMessage() != nil {
+		poster(r.chat, r.id, r.path)
+	}
 }
 
 func takeRecovery(chat, id string) bool {

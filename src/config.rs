@@ -51,6 +51,7 @@ pub const PHOTOS: Opt = Opt { key: "sidebar_avatars", label: "Mostrar fotos na l
 pub const RECEIPTS: Opt = Opt { key: "read_receipts", label: "Confirmações de leitura", default: true };
 pub const ENTER_SENDS: Opt = Opt { key: "enter_sends", label: "Enter envia a mensagem", default: true };
 pub const TRAY: Opt = Opt { key: "tray", label: "Mostrar o ícone na bandeja", default: true };
+pub const VIDEO_INLINE: Opt = Opt { key: "video_inline", label: "Tocar vídeos no app", default: true };
 pub const AUTO_UPDATE: Opt = Opt { key: "auto_update", label: "Procurar atualizações automaticamente", default: true };
 
 /// The settings dialog, top to bottom: a heading over each group's switches.
@@ -58,7 +59,7 @@ pub const AUTO_UPDATE: Opt = Opt { key: "auto_update", label: "Procurar atualiza
 pub const SECTIONS: &[(&str, &[Opt])] = &[
     ("Barra lateral", &[PHOTOS]),
     ("Conversas", &[RECEIPTS]),
-    ("Mensagens", &[ENTER_SENDS]),
+    ("Mensagens", &[ENTER_SENDS, VIDEO_INLINE]),
     ("Bandeja do sistema", &[TRAY]),
     ("Atualizações", &[AUTO_UPDATE]),
 ];
