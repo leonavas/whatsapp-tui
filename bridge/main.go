@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go.mau.fi/whatsmeow/proto/waCompanionReg"
 	"io"
 	"net/http"
 	"os"
@@ -193,7 +194,10 @@ func main() {
 	}
 	ctx := context.Background()
 
-	store.SetOSInfo("whatsapp-tui", [3]uint32{0, 1, 0})
+	// How the phone lists it under Linked devices: the name, and a computer
+	// icon (unknown platforms get a generic one). Read only when pairing.
+	store.SetOSInfo("WhatsApp TUI", [3]uint32{0, 1, 0})
+	store.DeviceProps.PlatformType = waCompanionReg.DeviceProps_DESKTOP.Enum()
 	container, err := sqlstore.New(ctx, "sqlite3", "file:"+filepath.Join(dir, "session.db")+"?_foreign_keys=on&_busy_timeout=5000", newLog("db", "WARN"))
 	if err != nil {
 		fatal(err)
