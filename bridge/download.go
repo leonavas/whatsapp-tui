@@ -352,7 +352,7 @@ func (b *Bridge) recoverMedia(chat, id, sender string, ts int64) {
 	}
 	// The phone may know a 1:1 chat by its LID: ask under both.
 	chats := []types.JID{jid}
-	if jid.Server == types.DefaultUserServer {
+	if jid.Server == types.DefaultUserServer && b.stored() {
 		if lid, err := b.cli.Store.LIDs.GetLIDForPN(b.ctx, jid); err == nil && !lid.IsEmpty() {
 			chats = append(chats, lid)
 		}

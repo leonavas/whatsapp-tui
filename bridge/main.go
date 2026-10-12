@@ -362,7 +362,7 @@ func (b *Bridge) handle(raw any) {
 // when the mapping is known, so one person is one chat.
 func (b *Bridge) norm(j types.JID) types.JID {
 	j = j.ToNonAD()
-	if j.Server == types.HiddenUserServer {
+	if j.Server == types.HiddenUserServer && b.stored() {
 		if pn, err := b.cli.Store.LIDs.GetPNForLID(b.ctx, j); err == nil && !pn.IsEmpty() {
 			return pn.ToNonAD()
 		}
@@ -377,7 +377,17 @@ func (b *Bridge) me() types.JID {
 	return b.cli.Store.ID.ToNonAD()
 }
 
+// stored says the device has its stores: a fresh one (never paired, or just
+// logged out) has none until pairing saves it, and chats left in the database
+// from before must not reach them.
+func (b *Bridge) stored() bool {
+	return b.cli.Store.Contacts != nil && b.cli.Store.LIDs != nil
+}
+
 func (b *Bridge) contactName(j types.JID) string {
+	if !b.stored() {
+		return ""
+	}
 	if c, err := b.cli.Store.Contacts.GetContact(b.ctx, j); err == nil && c.Found {
 		for _, n := range []string{c.FullName, c.FirstName, c.BusinessName, c.PushName} {
 			if n != "" {
@@ -992,7 +1002,9 @@ func (b *Bridge) search(q string) {
 	}
 	var contacts []contact
 	seen := map[string]bool{}
-	if all, err := b.cli.Store.Contacts.GetAllContacts(b.ctx); err == nil {
+	if !b.stored() {
+		// Not paired: no contacts yet.
+	} else if all, err := b.cli.Store.Contacts.GetAllContacts(b.ctx); err == nil {
 		for jid, c := range all {
 			j := b.norm(jid)
 			name := firstName(c)
@@ -1094,7 +1106,10 @@ func (b *Bridge) profile(chat string) {
 		})
 		p["members"] = members
 	} else {
-		c, _ := b.cli.Store.Contacts.GetContact(b.ctx, jid)
+		var c types.ContactInfo
+		if b.stored() {
+			c, _ = b.cli.Store.Contacts.GetContact(b.ctx, jid)
+		}
 		p["push_name"] = c.PushName
 		verified := ""
 		if info, err := b.cli.GetUserInfo(ctx, []types.JID{jid}); err != nil {
