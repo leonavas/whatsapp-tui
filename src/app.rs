@@ -220,6 +220,8 @@ pub struct App {
     pub react_btn: Option<crate::react::Quick>,
     /// The reactions' bar, open over a message.
     pub react_bar: Option<crate::react::Bar>,
+    /// Who reacted to a message, over its reactions.
+    pub react_who: Option<crate::react::Who>,
     pub panel_area: Rect,
     pub panel_close: Rect,
     /// Group members in the panel, to open a chat with.
@@ -333,6 +335,7 @@ impl App {
             hover_msg: None,
             react_btn: None,
             react_bar: None,
+            react_who: None,
             audio_hits: Vec::new(),
             player: crate::player::Player::new(tx.clone()),
             media_hits: Vec::new(),
@@ -603,7 +606,7 @@ impl App {
     }
 
     /// The info panel for `jid`: the open chat, or a group member's.
-    fn show_profile(&mut self, jid: String) {
+    pub(crate) fn show_profile(&mut self, jid: String) {
         if self.profile.as_ref().is_some_and(|p| p.chat == jid) {
             return;
         }
@@ -1247,6 +1250,32 @@ impl App {
         }
     }
 
+    /// Ctrl+←: the start of this word, or of the one before.
+    fn word_left(&self) -> usize {
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut i = self.caret;
+        while i > 0 && !chars[i - 1].is_alphanumeric() {
+            i -= 1;
+        }
+        while i > 0 && chars[i - 1].is_alphanumeric() {
+            i -= 1;
+        }
+        i
+    }
+
+    /// Ctrl+→: the end of this word, or of the next one.
+    fn word_right(&self) -> usize {
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut i = self.caret;
+        while i < chars.len() && !chars[i].is_alphanumeric() {
+            i += 1;
+        }
+        while i < chars.len() && chars[i].is_alphanumeric() {
+            i += 1;
+        }
+        i
+    }
+
     fn key_input(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         if self.format_key(k) {
@@ -1263,6 +1292,8 @@ impl App {
                 self.remove_at(self.caret);
             }
             KeyCode::Delete if self.caret < self.input.chars().count() => self.remove_at(self.caret),
+            KeyCode::Left if ctrl => self.caret = self.word_left(),
+            KeyCode::Right if ctrl => self.caret = self.word_right(),
             KeyCode::Left => self.caret = self.caret.saturating_sub(1),
             KeyCode::Right => self.caret = (self.caret + 1).min(self.input.chars().count()),
             // As on WhatsApp Web: Up in an empty box edits your last message.
@@ -1333,7 +1364,7 @@ impl App {
     }
 
     fn mouse(&mut self, m: MouseEvent) {
-        if self.viewer_mouse(m) || self.chat_menu_mouse(m) || self.account_mouse(m) || self.msg_menu_mouse(m) || self.emoji_panel_mouse(m) || self.emoji_click(m) || self.attach_mouse(m) || self.react_mouse(m) {
+        if self.viewer_mouse(m) || self.who_mouse(m) || self.chat_menu_mouse(m) || self.account_mouse(m) || self.msg_menu_mouse(m) || self.emoji_panel_mouse(m) || self.emoji_click(m) || self.attach_mouse(m) || self.react_mouse(m) {
             return;
         }
         let at = Position::new(m.column, m.row);

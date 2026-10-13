@@ -96,6 +96,15 @@ pub struct Reaction {
     pub emoji: String,
     pub count: u32,
     pub mine: bool,
+    /// Who sent it, the first to react first.
+    pub by: Vec<Reactor>,
+}
+
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct Reactor {
+    pub jid: String,
+    pub name: String,
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]

@@ -529,6 +529,7 @@ fn main_view(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
     crate::react::draw(f, app);
+    crate::react::draw_who(f, app);
     crate::msgmenu::draw(f, app);
     crate::emoji::draw(f, app);
     crate::emoji_panel::draw(f, app);
@@ -1113,7 +1114,10 @@ fn conversation(f: &mut Frame, app: &mut App, area: Rect) {
             let (qa, qb) = (q.max(start), (q + n).min(end));
             (qa < qb).then(|| Rect::new(rect.x + 1, y_of(qa), w.saturating_sub(3), (qb - qa) as u16))
         });
-        app.bubbles.push(crate::react::Hit { rect, id: s.id, from_me: s.from_me, quote });
+        let pill = s.pill.filter(|&(row, col, _)| row >= start && row < end && col < msgs_area.width as usize).map(|(row, col, pw)| {
+            Rect::new(msgs_area.x + col as u16, y_of(row), pw.min(msgs_area.width as usize - col) as u16, 1)
+        });
+        app.bubbles.push(crate::react::Hit { rect, id: s.id, from_me: s.from_me, quote, pill });
     }
     // The message gone to from a quote: its rows lit behind it, as WhatsApp
     // Web does, fading after a couple of seconds.
@@ -1343,6 +1347,8 @@ struct Spot {
     /// A group member's name over it, as (row, col, width): a click opens their info.
     name: Option<(usize, usize, usize)>,
     sender: String,
+    /// The reactions' pill under it, as (row, col, width): a click shows who reacted.
+    pill: Option<(usize, usize, usize)>,
 }
 
 /// An audio bubble's player: its first row and where its icon, button and
@@ -1510,8 +1516,8 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, faces: Option<u16>, ce
             out.push(Line::from(spans));
             let (sx, sw) = (ex.min(px), (ex + ew).max(px + pw) - ex.min(px));
             let top = out.len() - 1 - eh as usize;
-            spots.push(Spot { id: m.id.clone(), top, rows: eh as usize + 1, x: sx, w: sw, from_me: m.from_me, quote: None, name: name_at, sender: m.sender.clone() });
-            out.extend(reactions_line(m, sx, sw, width));
+            spots.push(Spot { id: m.id.clone(), top, rows: eh as usize + 1, x: sx, w: sw, from_me: m.from_me, quote: None, name: name_at, sender: m.sender.clone(), pill: None });
+            push_reactions(&mut out, &mut spots, m, sx, sw, width);
             prev_sender = Some(m.sender.as_str());
             continue;
         }
@@ -1730,8 +1736,8 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, faces: Option<u16>, ce
         }
         let quote = (!quote_rows.is_empty()).then(|| (top + quote_rows.start, quote_rows.len()));
         let name = name_w.map(|w| (top, x + 1, w));
-        spots.push(Spot { id: m.id.clone(), top, rows: n, x, w: bw, from_me: m.from_me, quote, name, sender: m.sender.clone() });
-        out.extend(reactions_line(m, x, bw, width));
+        spots.push(Spot { id: m.id.clone(), top, rows: n, x, w: bw, from_me: m.from_me, quote, name, sender: m.sender.clone(), pill: None });
+        push_reactions(&mut out, &mut spots, m, x, bw, width);
         prev_sender = Some(m.sender.as_str());
     }
     (out, decos, starts, bigs, link_cells, audios, pics, senders, spots)
@@ -1739,10 +1745,11 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, faces: Option<u16>, ce
 
 /// The reactions under a bubble, as WhatsApp Web's: a pill with up to three
 /// emojis, the most used first, and how many reacted when more than one;
-/// at the bubble's left for others', its right for yours.
-fn reactions_line(m: &Msg, x: usize, w: usize, width: usize) -> Option<Line<'static>> {
+/// at the bubble's left for others', its right for yours. Where it is goes
+/// to the message's spot, the last one.
+fn push_reactions(out: &mut Vec<Line<'static>>, spots: &mut [Spot], m: &Msg, x: usize, w: usize, width: usize) {
     if m.reactions.is_empty() {
-        return None;
+        return;
     }
     let total: u32 = m.reactions.iter().map(|r| r.count).sum();
     let mut label = String::from(" ");
@@ -1754,10 +1761,13 @@ fn reactions_line(m: &Msg, x: usize, w: usize, width: usize) -> Option<Line<'sta
     }
     label.push(' ');
     let pw = label.width() + 2;
-    let col = if m.from_me { (x + w).saturating_sub(pw + 1) } else { x + 1 };
-    let mut spans = vec![Span::raw(" ".repeat(col.min(width.saturating_sub(pw))))];
+    let col = if m.from_me { (x + w).saturating_sub(pw + 1) } else { x + 1 }.min(width.saturating_sub(pw));
+    let mut spans = vec![Span::raw(" ".repeat(col))];
     spans.extend(pill(label, TEXT, FIELD));
-    Some(Line::from(spans))
+    if let Some(s) = spots.last_mut() {
+        s.pill = Some((out.len(), col, pw));
+    }
+    out.push(Line::from(spans));
 }
 
 /// What's drawn over the panel's text: the big picture, or a member's.

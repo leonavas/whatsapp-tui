@@ -533,7 +533,7 @@ fn base64(data: &[u8]) -> String {
 /// whose menu is open), on its color.
 pub fn draw_chevron(f: &mut Frame, app: &mut App) {
     app.msg_menu.chevron = None;
-    if app.msg_menu.select.is_some() {
+    if app.msg_menu.select.is_some() || app.react_who.is_some() {
         return;
     }
     let id = app.msg_menu.popup.as_ref().map(|p| p.id.clone()).or_else(|| app.hover_msg.clone());

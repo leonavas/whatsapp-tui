@@ -13,12 +13,19 @@ import (
 	"go.mau.fi/whatsmeow/types"
 )
 
-// Reaction is one emoji under a message: how many sent it, and whether
-// you're one of them.
+// Reaction is one emoji under a message: how many sent it, whether you're
+// one of them, and who, the first to react first.
 type Reaction struct {
-	Emoji string `json:"emoji"`
-	Count int    `json:"count"`
-	Mine  bool   `json:"mine,omitempty"`
+	Emoji string    `json:"emoji"`
+	Count int       `json:"count"`
+	Mine  bool      `json:"mine,omitempty"`
+	By    []Reactor `json:"by,omitempty"`
+}
+
+// Reactor is someone who reacted, by the name their messages show.
+type Reactor struct {
+	JID  string `json:"jid"`
+	Name string `json:"name"`
 }
 
 // react keeps sender's reaction to a message; an empty emoji takes it back.
@@ -54,6 +61,7 @@ func (b *Bridge) withReactions(ms []Msg) {
 		byChat[ms[i].Chat] = append(byChat[ms[i].Chat], i)
 	}
 	me := b.me().String()
+	names := map[string]string{}
 	for chat, idx := range byChat {
 		at := map[string]int{}
 		args := []any{chat}
@@ -85,6 +93,12 @@ func (b *Bridge) withReactions(ms []Msg) {
 			if sender == me {
 				m.Reactions[k].Mine = true
 			}
+			name, ok := names[sender]
+			if !ok {
+				name = b.quoteName(sender)
+				names[sender] = name
+			}
+			m.Reactions[k].By = append(m.Reactions[k].By, Reactor{JID: sender, Name: name})
 		}
 		rows.Close()
 	}
