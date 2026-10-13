@@ -63,6 +63,9 @@ pub struct Msg {
     /// The emojis under it, the most used first.
     #[serde(default)]
     pub reactions: Vec<Reaction>,
+    /// The @s in its text that name someone.
+    #[serde(default)]
+    pub mentions: Vec<Mention>,
     /// A photo, video, audio, document or sticker, downloadable on demand.
     #[serde(default)]
     pub media: Option<Media>,
@@ -77,6 +80,16 @@ pub struct Msg {
 }
 
 /// One emoji under a message: how many sent it, and whether you did.
+/// An @ in a message's text: the digits it's written with, who that is
+/// and the name shown in their place.
+#[derive(Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct Mention {
+    pub user: String,
+    pub jid: String,
+    pub name: String,
+}
+
 #[derive(Deserialize, Clone, Debug, Default)]
 #[serde(default)]
 pub struct Reaction {

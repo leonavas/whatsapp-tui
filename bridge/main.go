@@ -54,6 +54,8 @@ type Msg struct {
 	QuoteName string `json:"quote_name,omitempty"`
 	// The emojis under it, the most used first.
 	Reactions []Reaction `json:"reactions,omitempty"`
+	// The @s in its text that name someone.
+	Mentions []Mention `json:"mentions,omitempty"`
 	// A photo, video, audio, document or sticker; nil for the rest.
 	Media *Media `json:"media,omitempty"`
 	// A business's title, footer and buttons around the text.
@@ -667,6 +669,9 @@ func (b *Bridge) message(e *events.Message, status int) *Msg {
 	}
 	m.SenderName = b.senderName(sender, e.Info.PushName)
 	m.QuoteName = b.quoteName(m.QuoteFrom)
+	seen := map[string]*Mention{}
+	m.Mentions = b.mentions(m.Text, seen)
+	m.Quote = withMentions(m.Quote, b.mentions(m.Quote, seen))
 	b.dirty.Store(true)
 	return m
 }
@@ -992,7 +997,7 @@ func (b *Bridge) flushChats() {
 func (b *Bridge) chats() []Chat {
 	// Cleared ones stay, empty, as on the phone.
 	rows, err := b.db.Query(`SELECT c.jid, c.name, c.last_ts, c.unread, c.pinned, c.archived, c.mute_until, c.read_only, c.favorite, c.verified,
-		COALESCE(m.text, ''), COALESCE(m.from_me, 0), COALESCE(m.status, 0)
+		COALESCE(m.text, ''), COALESCE(m.from_me, 0), COALESCE(m.status, 0), COALESCE(m.sender, ''), COALESCE(m.push_name, '')
 		FROM chats c LEFT JOIN messages m ON m.rowid = (
 			SELECT rowid FROM messages WHERE chat = c.jid ORDER BY ts DESC LIMIT 1)
 		WHERE m.rowid IS NOT NULL OR c.cleared > 0`)
@@ -1002,11 +1007,12 @@ func (b *Bridge) chats() []Chat {
 	defer rows.Close()
 	now := time.Now().Unix()
 	out := []Chat{}
+	seen := map[string]*Mention{}
 	for rows.Next() {
 		var c Chat
 		var mute, fav int64
-		var level string
-		if rows.Scan(&c.JID, &c.Name, &c.LastTS, &c.Unread, &c.PinTS, &c.Archived, &mute, &c.ReadOnly, &fav, &level, &c.Preview, &c.FromMe, &c.Status) != nil {
+		var level, sender, push string
+		if rows.Scan(&c.JID, &c.Name, &c.LastTS, &c.Unread, &c.PinTS, &c.Archived, &mute, &c.ReadOnly, &fav, &level, &c.Preview, &c.FromMe, &c.Status, &sender, &push) != nil {
 			continue
 		}
 		jid, _ := types.ParseJID(c.JID)
@@ -1025,6 +1031,13 @@ func (b *Bridge) chats() []Chat {
 			}
 		} else if c.Name == "" {
 			c.Name = "Grupo"
+		}
+		c.Preview = withMentions(c.Preview, b.mentions(c.Preview, seen))
+		// In a group, who wrote it before it, as WhatsApp Web shows it.
+		if c.Group && !c.FromMe && sender != "" && c.Preview != "" {
+			if j, err := types.ParseJID(sender); err == nil {
+				c.Preview = b.senderName(j, push) + ": " + c.Preview
+			}
 		}
 		out = append(out, c)
 	}
@@ -1056,6 +1069,7 @@ func (b *Bridge) query(where string, args ...any) []Msg {
 	}
 	defer rows.Close()
 	names := map[string]string{}
+	seen := map[string]*Mention{}
 	var out []Msg
 	for rows.Next() {
 		var m Msg
@@ -1090,6 +1104,8 @@ func (b *Bridge) query(where string, args ...any) []Msg {
 				names[m.QuoteFrom] = m.QuoteName
 			}
 		}
+		m.Mentions = b.mentions(m.Text, seen)
+		m.Quote = withMentions(m.Quote, b.mentions(m.Quote, seen))
 		out = append(out, m)
 	}
 	rows.Close()

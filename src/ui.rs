@@ -1097,7 +1097,12 @@ fn conversation(f: &mut Frame, app: &mut App, area: Rect) {
     }
     // Where the bubbles are, for the reactions and the clicks on quotes.
     app.bubbles.clear();
+    app.sender_hits.clear();
     for s in spots {
+        if let Some((row, col, w)) = s.name.filter(|&(row, col, _)| row >= start && row < end && col < msgs_area.width as usize) {
+            let w = w.min(msgs_area.width as usize - col) as u16;
+            app.sender_hits.push((Rect::new(msgs_area.x + col as u16, y_of(row), w, 1), s.sender.clone()));
+        }
         let (a, b) = (s.top.max(start), (s.top + s.rows).min(end));
         if a >= b || s.x >= msgs_area.width as usize {
             continue;
@@ -1131,13 +1136,15 @@ fn conversation(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
     crate::msgmenu::draw_checks(f, app, full_msgs);
-    crate::react::draw_button(f, app);
+    crate::react::draw_quick(f, app);
     crate::msgmenu::draw_chevron(f, app);
     // The senders' pictures only whole, as the big emojis.
     if let Some(w) = faces {
         for (row, col, sender) in senders {
             if row >= start && row + 2 <= end {
-                draw_avatar(f, app, &sender, false, Rect::new(msgs_area.x + col as u16, y_of(row), w, 2));
+                let rect = Rect::new(msgs_area.x + col as u16, y_of(row), w, 2);
+                draw_avatar(f, app, &sender, false, rect);
+                app.sender_hits.push((rect, sender));
             }
         }
     }
@@ -1333,6 +1340,9 @@ struct Spot {
     w: usize,
     from_me: bool,
     quote: Option<(usize, usize)>,
+    /// A group member's name over it, as (row, col, width): a click opens their info.
+    name: Option<(usize, usize, usize)>,
+    sender: String,
 }
 
 /// An audio bubble's player: its first row and where its icon, button and
@@ -1470,9 +1480,12 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, faces: Option<u16>, ce
         });
         if let Some((ew, eh, sticker)) = sticker.or(big).filter(|&(ew, ..)| ew + 4 + face_w <= width) {
             starts.push((m.id.clone(), out.len()));
+            let mut name_at = None;
             if group && !m.from_me && first {
                 let name = Style::new().fg(who_color).add_modifier(Modifier::BOLD);
-                out.push(Line::from(vec![Span::raw(" ".repeat(left)), Span::styled(truncate(&m.sender_name, inner), name)]));
+                let shown = truncate(&m.sender_name, inner);
+                name_at = Some((out.len(), left, shown.width()));
+                out.push(Line::from(vec![Span::raw(" ".repeat(left)), Span::styled(shown, name)]));
             }
             let mut stamp = vec![Span::styled(format!(" {}", t.format("%H:%M")), Style::new().fg(META_IN).bg(DAY_PILL))];
             // Big emojis only come with pictures: the ticks are one, over blanks.
@@ -1497,7 +1510,7 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, faces: Option<u16>, ce
             out.push(Line::from(spans));
             let (sx, sw) = (ex.min(px), (ex + ew).max(px + pw) - ex.min(px));
             let top = out.len() - 1 - eh as usize;
-            spots.push(Spot { id: m.id.clone(), top, rows: eh as usize + 1, x: sx, w: sw, from_me: m.from_me, quote: None });
+            spots.push(Spot { id: m.id.clone(), top, rows: eh as usize + 1, x: sx, w: sw, from_me: m.from_me, quote: None, name: name_at, sender: m.sender.clone() });
             out.extend(reactions_line(m, sx, sw, width));
             prev_sender = Some(m.sender.as_str());
             continue;
@@ -1509,8 +1522,11 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, faces: Option<u16>, ce
 
         // The bubble's content, row by row.
         let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
+        let mut name_w = None;
         if group && !m.from_me && first {
-            rows.push(vec![Span::styled(truncate(&m.sender_name, inner), Style::new().fg(who_color).bg(bg).add_modifier(Modifier::BOLD))]);
+            let shown = truncate(&m.sender_name, inner);
+            name_w = Some(shown.width());
+            rows.push(vec![Span::styled(shown, Style::new().fg(who_color).bg(bg).add_modifier(Modifier::BOLD))]);
         }
         // A quote in a box of its own, as WhatsApp Web's: a bar in its
         // author's color, their name, then up to two lines of it.
@@ -1566,8 +1582,10 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, faces: Option<u16>, ce
             2
         } else {
             // WhatsApp's formatting, its markers hidden: the rows' widths are what's shown.
-            let looks = crate::markup::Looks { base: body, link, shade: if m.from_me { code_out() } else { CODE_IN }, dim: meta_fg };
-            let (text, found) = crate::markup::rows(text, wrap, &looks);
+            let mention = Style::new().fg(if m.from_me { link_out() } else { green() }).bg(bg);
+            let looks = crate::markup::Looks { base: body, link, mention, shade: if m.from_me { code_out() } else { CODE_IN }, dim: meta_fg };
+            let (text, at) = crate::markup::mentions(text, &m.mentions);
+            let (text, found) = crate::markup::rows(&text, wrap, &looks, &at);
             pieces.extend(found.into_iter().map(|(r, c, w, url)| (rows.len() + r, c, w, url)));
             let n_text = text.len();
             rows.extend(text);
@@ -1711,7 +1729,8 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, faces: Option<u16>, ce
             });
         }
         let quote = (!quote_rows.is_empty()).then(|| (top + quote_rows.start, quote_rows.len()));
-        spots.push(Spot { id: m.id.clone(), top, rows: n, x, w: bw, from_me: m.from_me, quote });
+        let name = name_w.map(|w| (top, x + 1, w));
+        spots.push(Spot { id: m.id.clone(), top, rows: n, x, w: bw, from_me: m.from_me, quote, name, sender: m.sender.clone() });
         out.extend(reactions_line(m, x, bw, width));
         prev_sender = Some(m.sender.as_str());
     }
@@ -2096,8 +2115,8 @@ fn opening(hours: &[Hours], tz: Option<i32>) -> Opening {
 /// Text wrapped to `width` after `lead`, with WhatsApp's formatting, its
 /// links and e-mails in green.
 fn paragraph(lines: &mut Vec<Line<'static>>, text: &str, width: usize, lead: &str) {
-    let looks = crate::markup::Looks { base: Style::new().fg(TEXT), link: Style::new().fg(green()), shade: CODE_IN, dim: META_IN };
-    for row in crate::markup::rows(text, width, &looks).0 {
+    let looks = crate::markup::Looks { base: Style::new().fg(TEXT), link: Style::new().fg(green()), mention: Style::new().fg(green()), shade: CODE_IN, dim: META_IN };
+    for row in crate::markup::rows(text, width, &looks, &[]).0 {
         let mut spans = vec![Span::raw(lead.to_string())];
         spans.extend(row);
         lines.push(Line::from(spans));

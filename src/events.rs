@@ -188,7 +188,7 @@ fn cut(text: &str) -> String {
 }
 
 fn message_json(m: &Msg) -> Value {
-    let text = cut(m.text.trim());
+    let text = cut(crate::markup::mentions(m.text.trim(), &m.mentions).0.as_str());
     json!({ "id": m.id, "ts": m.ts, "sender": m.sender, "author": crate::ui::display_name(&m.sender_name, &m.sender), "text": text, "html": crate::markup::html(&text) })
 }
 

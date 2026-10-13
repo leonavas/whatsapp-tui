@@ -214,16 +214,18 @@ pub struct App {
     pub flash: Option<(String, Instant)>,
     /// The bubbles on screen, from the last draw.
     pub bubbles: Vec<crate::react::Hit>,
-    /// The message the pointer's over: its smiley shows.
+    /// The message the pointer's over: its quick reactions show.
     pub hover_msg: Option<String>,
-    /// That smiley, and its message.
-    pub react_btn: Option<(Rect, String)>,
+    /// Those quick reactions, from the last draw.
+    pub react_btn: Option<crate::react::Quick>,
     /// The reactions' bar, open over a message.
     pub react_bar: Option<crate::react::Bar>,
     pub panel_area: Rect,
     pub panel_close: Rect,
     /// Group members in the panel, to open a chat with.
     pub panel_hits: Vec<(Rect, String)>,
+    /// In a group, the senders' names and pictures by their bubbles: a click opens their info.
+    pub sender_hits: Vec<(Rect, String)>,
     /// A business's hours row, a click shows the week.
     pub panel_week: Rect,
     /// A business's address and its Google Maps link, a click opens it.
@@ -321,6 +323,7 @@ impl App {
             panel_area: Rect::default(),
             panel_close: Rect::default(),
             panel_hits: Vec::new(),
+            sender_hits: Vec::new(),
             panel_week: Rect::default(),
             panel_maps: Rect::default(),
             msg_links: Vec::new(),
@@ -596,8 +599,16 @@ impl App {
             self.profile = None;
             return;
         }
-        self.profile = Some(ProfileView { chat: chat.clone(), data: None, photo: None, scroll: 0, week: false });
-        self.cmd(json!({"c": "profile", "chat": chat}));
+        self.show_profile(chat);
+    }
+
+    /// The info panel for `jid`: the open chat, or a group member's.
+    fn show_profile(&mut self, jid: String) {
+        if self.profile.as_ref().is_some_and(|p| p.chat == jid) {
+            return;
+        }
+        self.profile = Some(ProfileView { chat: jid.clone(), data: None, photo: None, scroll: 0, week: false });
+        self.cmd(json!({"c": "profile", "chat": jid}));
     }
 
     /// The terminal got or lost the keyboard. Coming back reads what arrived
@@ -882,7 +893,9 @@ impl App {
             Some(c) => {
                 if m.ts >= c.last_ts {
                     c.last_ts = m.ts;
-                    c.preview = m.text.clone();
+                    // As the bridge's list has it: names for the @s, and in a group who wrote it.
+                    let text = crate::markup::mentions(&m.text, &m.mentions).0;
+                    c.preview = if c.group && !m.from_me && !text.is_empty() { format!("{}: {text}", m.sender_name) } else { text };
                     c.from_me = m.from_me;
                     c.status = m.status;
                 }
@@ -1374,8 +1387,28 @@ impl App {
                 self.open_media(h);
             }
             MouseEventKind::Down(MouseButton::Left) if self.msgs_area.contains(at) && self.msg_links.iter().any(|(r, _)| r.contains(at)) => {
-                if let Some((_, url)) = self.msg_links.iter().find(|(r, _)| r.contains(at)) {
-                    crate::links::open(url);
+                if let Some((_, url)) = self.msg_links.iter().find(|(r, _)| r.contains(at)).cloned() {
+                    match url.strip_prefix(crate::markup::MENTION) {
+                        Some(jid) => {
+                            let jid = jid.to_string();
+                            let name = self.open.as_ref().and_then(|c| self.msgs.get(c)).and_then(|l| l.iter().flat_map(|m| &m.mentions).find(|x| x.jid == jid)).map(|x| x.name.clone());
+                            if let Some(n) = name {
+                                self.names.entry(jid.clone()).or_insert(n);
+                            }
+                            self.show_profile(jid);
+                        }
+                        None => crate::links::open(&url),
+                    }
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) if self.msgs_area.contains(at) && self.sender_hits.iter().any(|(r, _)| r.contains(at)) => {
+                if let Some((_, jid)) = self.sender_hits.iter().find(|(r, _)| r.contains(at)).cloned() {
+                    // Their name in the group while the panel loads, not just a number.
+                    let name = self.open.as_ref().and_then(|c| self.msgs.get(c)).and_then(|l| l.iter().rev().find(|m| m.sender == jid)).map(|m| m.sender_name.clone());
+                    if let Some(n) = name.filter(|n| !n.is_empty()) {
+                        self.names.entry(jid.clone()).or_insert(n);
+                    }
+                    self.show_profile(jid);
                 }
             }
             MouseEventKind::Down(MouseButton::Left) if self.header_area.contains(at) => self.toggle_profile(),

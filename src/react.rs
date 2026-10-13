@@ -1,6 +1,7 @@
-//! Reactions, as on WhatsApp Web: hovering a message shows a smiley by its
-//! bubble (and the message menu has "Reagir"), whose bar has six emojis and a
-//! + for the emoji panel; your own reaction picked again takes it back.
+//! Reactions: hovering a message shows its quick reactions by the bubble, as
+//! Slack's, six emojis and a + for the emoji panel; the message menu's
+//! "Reagir" opens them in a bar, as WhatsApp Web's. Your own reaction picked
+//! again takes it back.
 //! Also a click on a reply's quote, which goes to the message it quotes.
 
 use crate::app::{App, Phase};
@@ -28,6 +29,15 @@ pub struct Hit {
     pub id: String,
     pub from_me: bool,
     pub quote: Option<Rect>,
+}
+
+/// The quick reactions by the hovered message, from the last draw.
+pub struct Quick {
+    pub id: String,
+    area: Rect,
+    items: Vec<Rect>,
+    /// The choice under the pointer.
+    sel: Option<usize>,
 }
 
 /// The bar of reactions over a message.
@@ -70,9 +80,14 @@ impl App {
 
     fn react_pick(&mut self, i: usize) {
         let Some(bar) = self.react_bar.take() else { return };
+        self.quick_pick(bar.chat, bar.id, i);
+    }
+
+    /// The `i`th quick reaction, or the +: the emoji panel.
+    fn quick_pick(&mut self, chat: String, id: String, i: usize) {
         match QUICK.get(i) {
-            Some(e) => self.react(&bar.chat, &bar.id, e),
-            None => self.emoji_panel_react((bar.chat, bar.id)),
+            Some(e) => self.react(&chat, &id, e),
+            None => self.emoji_panel_react((chat, id)),
         }
     }
 
@@ -116,7 +131,7 @@ impl App {
         true
     }
 
-    /// The bar's clicks and hovering, the smiley, a click on a quote; and which message the pointer's over.
+    /// The bar's clicks and hovering, the quick reactions', a click on a quote; and which message the pointer's over.
     pub fn react_mouse(&mut self, m: MouseEvent) -> bool {
         let at = Position::new(m.column, m.row);
         if let Some(bar) = self.react_bar.as_mut() {
@@ -142,14 +157,23 @@ impl App {
             return true;
         }
         let on_row = |h: &&Hit| self.msgs_area.contains(at) && at.y >= h.rect.y && at.y < h.rect.bottom();
+        // Over the quick reactions, their message stays hovered, also on the row over it.
+        let on_quick = self.react_btn.as_ref().filter(|q| q.area.contains(at)).map(|q| (q.id.clone(), q.items.iter().position(|r| r.contains(at))));
         match m.kind {
             MouseEventKind::Moved => {
-                self.hover_msg = self.bubbles.iter().find(on_row).map(|h| h.id.clone());
-                false
+                if let Some(q) = self.react_btn.as_mut() {
+                    q.sel = on_quick.as_ref().and_then(|(_, i)| *i);
+                }
+                if on_quick.is_none() {
+                    self.hover_msg = self.bubbles.iter().find(on_row).map(|h| h.id.clone());
+                }
+                on_quick.is_some()
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some((r, id)) = self.react_btn.clone().filter(|(r, _)| r.contains(at)) {
-                    self.open_react_bar(id, r);
+                if let Some((id, i)) = on_quick {
+                    if let (Some(i), Some(chat)) = (i, self.open.clone()) {
+                        self.quick_pick(chat, id, i);
+                    }
                     return true;
                 }
                 let quoted = self.bubbles.iter().find(|h| h.quote.is_some_and(|q| q.contains(at))).map(|h| h.id.clone());
@@ -164,21 +188,69 @@ impl App {
     }
 }
 
-/// The smiley by the hovered (or reacted-to) message, outside its bubble:
-/// to the right of others', to the left of yours.
-pub fn draw_button(f: &mut Frame, app: &mut App) {
-    app.react_btn = None;
-    if app.msg_menu.select.is_some() {
+/// The quick reactions by the hovered message, as Slack's: on its top row,
+/// outside the bubble when there's room (to the right of others', to the
+/// left of yours), else on the row over it (under it at the top of the
+/// screen); the choice under the pointer and yours lit.
+pub fn draw_quick(f: &mut Frame, app: &mut App) {
+    let prev = app.react_btn.take();
+    if app.msg_menu.select.is_some() || app.react_bar.is_some() {
         return;
     }
-    let id = app.react_bar.as_ref().map(|b| b.id.clone()).or_else(|| app.hover_msg.clone());
-    let Some(h) = id.and_then(|id| app.bubbles.iter().find(|h| h.id == id)) else { return };
+    let Some(id) = app.hover_msg.clone() else { return };
+    let Some(h) = app.bubbles.iter().find(|h| h.id == id) else { return };
+    let sel = prev.filter(|q| q.id == id).and_then(|q| q.sel);
     let area = app.msgs_area;
-    let x = if h.from_me { h.rect.x.checked_sub(3) } else { Some(h.rect.right() + 1).filter(|x| x + 2 <= area.right()) };
-    let Some(x) = x.filter(|&x| x >= area.x) else { return };
-    let r = Rect::new(x, h.rect.y + h.rect.height.saturating_sub(1) / 2, 2, 1);
-    f.render_widget(Paragraph::new(Span::styled(SMILEY, Style::new().fg(META_IN))), r);
-    app.react_btn = Some((r, h.id.clone()));
+    // The caps, a space each item and after the last; each item 2 cells.
+    let n = QUICK.len() as u16 + 1;
+    let w = n * 3 + 3;
+    if area.width < w {
+        return;
+    }
+    let beside = if h.from_me {
+        h.rect.x.checked_sub(w + 1).filter(|&x| x >= area.x)
+    } else {
+        Some(h.rect.right() + 1).filter(|&x| x + w <= area.right())
+    };
+    let (x, y) = match beside {
+        Some(x) => (x, h.rect.y),
+        None => {
+            let y = if h.rect.y > area.y {
+                h.rect.y - 1
+            } else if h.rect.bottom() < area.bottom() {
+                h.rect.bottom()
+            } else {
+                return;
+            };
+            (h.rect.right().saturating_sub(w).max(h.rect.x).min(area.right() - w).max(area.x), y)
+        }
+    };
+    let mine = app
+        .open
+        .as_ref()
+        .and_then(|c| app.msgs.get(c))
+        .and_then(|l| l.iter().find(|m| m.id == id))
+        .and_then(|m| m.reactions.iter().find(|r| r.mine))
+        .map(|r| r.emoji.clone());
+
+    let bg = Style::new().bg(DAY_PILL);
+    let mut spans = vec![Span::styled(CAP_L, Style::new().fg(DAY_PILL))];
+    let mut items = Vec::new();
+    for i in 0..n as usize {
+        let (glyph, fg) = match QUICK.get(i) {
+            Some(e) => (*e, TEXT),
+            None => ("+ ", META_IN),
+        };
+        let lit = sel == Some(i) || QUICK.get(i).is_some_and(|e| mine.as_deref() == Some(*e));
+        let style = if lit { Style::new().fg(fg).bg(HOVER) } else { bg.fg(fg) };
+        spans.extend([Span::styled(" ", bg), Span::styled(glyph, style)]);
+        items.push(Rect::new(x + 1 + i as u16 * 3, y, 3, 1));
+    }
+    spans.extend([Span::styled(" ", bg), Span::styled(CAP_R, Style::new().fg(DAY_PILL))]);
+    let r = Rect::new(x, y, w, 1);
+    f.render_widget(Clear, r);
+    f.render_widget(Paragraph::new(Line::from(spans)), r);
+    app.react_btn = Some(Quick { id, area: r, items, sel });
 }
 
 /// The bar, over the message (under it at the top of the screen): a

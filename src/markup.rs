@@ -5,6 +5,7 @@
 //! the plugin's HTML.
 
 use crate::app::App;
+use crate::bridge::Mention;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
@@ -184,11 +185,51 @@ pub fn style(look: u16, base: Style, shade: Color) -> Style {
     s
 }
 
-/// The colors `rows` draws with: the text's, a link's, code's background
-/// and a quote's grey.
+/// What a mention's link opens: that person's info, not a page.
+pub const MENTION: &str = "wa-mention:";
+
+fn word(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// The text with each @'s digits replaced by the name, as WhatsApp shows
+/// it, and where each mention is as (first char, past its last, MENTION
+/// and the jid). An @ counts at a word's start, with five digits or more.
+pub fn mentions(text: &str, ms: &[Mention]) -> (String, Vec<(usize, usize, String)>) {
+    if ms.is_empty() {
+        return (text.to_string(), Vec::new());
+    }
+    let c: Vec<char> = text.chars().collect();
+    let (mut out, mut at, mut n) = (String::new(), Vec::new(), 0);
+    let mut i = 0;
+    while i < c.len() {
+        if c[i] == '@' && (i == 0 || !word(c[i - 1])) {
+            let j = (i + 1..c.len()).find(|&k| !c[k].is_ascii_digit()).unwrap_or(c.len());
+            let user: String = c[i + 1..j].iter().collect();
+            let whole = j - i > 5 && c.get(j).is_none_or(|&x| !word(x));
+            if let Some(m) = ms.iter().find(|m| m.user == user).filter(|_| whole) {
+                let shown = format!("@{}", m.name);
+                let len = shown.chars().count();
+                at.push((n, n + len, format!("{MENTION}{}", m.jid)));
+                out.push_str(&shown);
+                n += len;
+                i = j;
+                continue;
+            }
+        }
+        out.push(c[i]);
+        n += 1;
+        i += 1;
+    }
+    (out, at)
+}
+
+/// The colors `rows` draws with: the text's, a link's, a mention's, code's
+/// background and a quote's grey.
 pub struct Looks {
     pub base: Style,
     pub link: Style,
+    pub mention: Style,
     pub shade: Color,
     pub dim: Color,
 }
@@ -199,10 +240,12 @@ pub type Rows = (Vec<Vec<Span<'static>>>, Vec<(usize, usize, usize, String)>);
 /// The text in rows of `width`, as WhatsApp Web shows it: markers hidden,
 /// quotes behind a bar, list items with their bullet or number and a
 /// hanging indent. Wrapped on what's shown, so widths and links add up.
-pub fn rows(text: &str, width: usize, lk: &Looks) -> Rows {
+/// `mentions` (from `mentions`) are drawn as links to their person.
+pub fn rows(text: &str, width: usize, lk: &Looks, mentions: &[(usize, usize, String)]) -> Rows {
     let c: Vec<char> = text.chars().collect();
     let f = scan(&c);
-    let found = crate::links::find(text);
+    let mut found = crate::links::find(text);
+    found.extend(mentions.iter().cloned());
     let owner = |i: usize| found.iter().position(|&(a, b, _)| (a..b).contains(&i));
     let (mut out, mut links) = (Vec::new(), Vec::new());
     let mut s = 0;
@@ -243,7 +286,8 @@ pub fn rows(text: &str, width: usize, lk: &Looks) -> Rows {
                     let st = match who {
                         Some(j) => {
                             links.push((out.len(), col, w, found[j].2.clone()));
-                            style(look, lk.link, lk.shade)
+                            let st = if found[j].2.starts_with(MENTION) { lk.mention } else { lk.link };
+                            style(look, st, lk.shade)
                         }
                         None => style(look, body, lk.shade),
                     };
