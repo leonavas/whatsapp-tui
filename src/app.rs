@@ -146,6 +146,13 @@ pub struct ProfileView {
     pub chat: String,
     pub data: Option<Profile>,
     pub photo: Option<DynamicImage>,
+    /// The full-size picture's file: None until the bridge says, empty when
+    /// there's none to show.
+    pub pic: Option<String>,
+    /// The picture open big, over everything.
+    pub big: Option<crate::photo::View>,
+    /// Where the picture was on the last draw, for a click.
+    pub pic_area: Rect,
     pub scroll: usize,
     /// A business's whole week shown, not just today.
     pub week: bool,
@@ -234,6 +241,10 @@ pub struct App {
     pub panel_maps: Rect,
     /// Links in the messages on screen, a piece per row; a click opens it.
     pub msg_links: Vec<(Rect, String)>,
+    /// Long messages opened past their "Ler mais", by (chat, id).
+    pub expanded: HashSet<(String, String)>,
+    /// The "Ler mais" on screen: where, its message and how many rows it grows by.
+    pub more_hits: Vec<(Rect, String, usize)>,
     pub audio_hits: Vec<AudioHit>,
     pub player: crate::player::Player,
     /// Photos and videos on screen.
@@ -280,6 +291,8 @@ pub struct App {
     pub account: crate::account::Account,
     /// The settings dialog's switches.
     pub settings: crate::config::Settings,
+    /// The column between the list and the conversation, dragged to resize the list.
+    pub divider: crate::divider::Divider,
     bridge: Option<Bridge>,
     pub(crate) tx: Sender<Ev>,
 }
@@ -329,6 +342,8 @@ impl App {
             panel_week: Rect::default(),
             panel_maps: Rect::default(),
             msg_links: Vec::new(),
+            expanded: HashSet::new(),
+            more_hits: Vec::new(),
             newest_btn: Rect::default(),
             flash: None,
             bubbles: Vec::new(),
@@ -361,6 +376,7 @@ impl App {
             me: String::new(),
             account: Default::default(),
             settings: crate::config::Settings::load(),
+            divider: crate::divider::Divider::load(),
             bridge: None,
             tx,
         };
@@ -545,6 +561,8 @@ impl App {
             Item::Chat(c) => self.open_chat(c.jid),
             Item::Message(m) => {
                 self.jump = Some(m.id.clone());
+                // What was found may be past its "Ler mais".
+                self.expanded.insert((m.chat.clone(), m.id.clone()));
                 self.open_chat(m.chat);
             }
             Item::Contact(c) => {
@@ -610,7 +628,7 @@ impl App {
         if self.profile.as_ref().is_some_and(|p| p.chat == jid) {
             return;
         }
-        self.profile = Some(ProfileView { chat: jid.clone(), data: None, photo: None, scroll: 0, week: false });
+        self.profile = Some(ProfileView { chat: jid.clone(), data: None, photo: None, pic: None, big: None, pic_area: Rect::default(), scroll: 0, week: false });
         self.cmd(json!({"c": "profile", "chat": jid}));
     }
 
@@ -829,10 +847,15 @@ impl App {
                     return;
                 }
                 if let Some(view) = self.profile.as_mut().filter(|v| v.chat == p.chat) {
-                    view.photo = (!p.photo.is_empty()).then(|| image::open(&p.photo).ok()).flatten();
                     view.data = Some(p);
-                    self.protocols.retain(|(k, _, _), _| !k.starts_with("big:"));
                 }
+            }
+            Event::Photo { chat, path, error } => {
+                let Some(view) = self.profile.as_mut().filter(|v| v.chat == chat) else { return };
+                view.photo = (!path.is_empty()).then(|| image::open(&path).ok()).flatten();
+                view.pic = Some(path.clone());
+                self.protocols.retain(|(k, _, _), _| !k.starts_with("big:") && !k.starts_with("photo:"));
+                self.photo_arrived(&path, &error);
             }
             Event::Avatar { chat, path } => {
                 let img = (!path.is_empty()).then(|| image::open(&path).ok()).flatten();
@@ -858,6 +881,8 @@ impl App {
                     md.thumb = path;
                 }
             }
+            Event::StickerFav { chat, id, fav } => self.viewer_fav_state(&chat, &id, fav),
+            Event::ChatSubs { subs } => self.msg_menu.fwd.subs = subs,
             Event::Error { text, fatal } => {
                 if fatal {
                     self.phase = Phase::Dead(text);
@@ -1087,7 +1112,7 @@ impl App {
             return;
         }
         // The viewer's over everything, also while its video has the screen.
-        if self.viewer_key(k) {
+        if self.viewer_key(k) || self.photo_key(k) {
             return;
         }
         let main_view = self.phase == Phase::Ready || (!self.chats.is_empty() && matches!(self.phase, Phase::Starting | Phase::Connecting));
@@ -1159,6 +1184,7 @@ impl App {
             KeyCode::Tab if self.open.is_some() => self.focus_input(),
             // Ctrl+I is Tab to the terminal; `i` here instead.
             KeyCode::Char('i') => self.toggle_profile(),
+            KeyCode::Char('I') => self.chat_photo(),
             KeyCode::Char(',') => self.open_account_menu(),
             KeyCode::Char('?') => self.open_shortcuts(),
             KeyCode::Char(' ') => self.play_last(),
@@ -1286,6 +1312,7 @@ impl App {
             KeyCode::Enter if self.msg_menu.editing.is_some() => self.send_edit(),
             KeyCode::Enter => self.send(),
             KeyCode::Esc if self.msg_menu.editing.is_some() => self.cancel_edit(),
+            KeyCode::Esc if self.replying() => self.cancel_reply(),
             KeyCode::Esc | KeyCode::Tab => self.focus = Focus::Sidebar,
             KeyCode::Backspace if self.caret > 0 => {
                 self.caret -= 1;
@@ -1357,14 +1384,22 @@ impl App {
         if self.phase != Phase::Ready {
             return self.note("Ainda conectando; tente de novo em instantes.");
         }
-        self.cmd(json!({"c": "send", "chat": chat, "text": text}));
+        let reply = self.take_reply(&chat);
+        self.cmd(json!({"c": "send", "chat": chat, "text": text, "reply": reply}));
         self.input.clear();
         self.caret = 0;
         self.scroll = 0;
     }
 
     fn mouse(&mut self, m: MouseEvent) {
-        if self.viewer_mouse(m) || self.who_mouse(m) || self.chat_menu_mouse(m) || self.account_mouse(m) || self.msg_menu_mouse(m) || self.emoji_panel_mouse(m) || self.emoji_click(m) || self.attach_mouse(m) || self.react_mouse(m) {
+        // The divider being dragged keeps the mouse until let go.
+        if self.divider_held(m) {
+            return;
+        }
+        if self.viewer_mouse(m) || self.photo_mouse(m) || self.who_mouse(m) || self.chat_menu_mouse(m) || self.account_mouse(m) || self.msg_menu_mouse(m) || self.emoji_panel_mouse(m) || self.emoji_click(m) || self.attach_mouse(m) || self.react_mouse(m) {
+            return;
+        }
+        if self.divider_mouse(m) {
             return;
         }
         let at = Position::new(m.column, m.row);
@@ -1386,6 +1421,7 @@ impl App {
                     crate::links::open(&url);
                 }
             }
+            MouseEventKind::Down(MouseButton::Left) if self.profile.as_ref().is_some_and(|p| p.pic_area.contains(at)) => self.open_photo(),
             MouseEventKind::Down(MouseButton::Left) if self.panel_week.contains(at) => {
                 if let Some(p) = self.profile.as_mut() {
                     p.week = !p.week;
@@ -1416,6 +1452,14 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) if self.media_hits.iter().any(|h| h.rect.contains(at)) => {
                 let h = self.media_hits.iter().find(|h| h.rect.contains(at)).cloned().unwrap();
                 self.open_media(h);
+            }
+            MouseEventKind::Down(MouseButton::Left) if self.more_hits.iter().any(|(r, ..)| r.contains(at)) => {
+                let hit = self.more_hits.iter().find(|(r, ..)| r.contains(at)).map(|(_, id, grow)| (id.clone(), *grow));
+                if let (Some((id, grow)), Some(chat)) = (hit, self.open.clone()) {
+                    // It grows downward: what's over it stays put.
+                    self.scroll += grow;
+                    self.expanded.insert((chat, id));
+                }
             }
             MouseEventKind::Down(MouseButton::Left) if self.msgs_area.contains(at) && self.msg_links.iter().any(|(r, _)| r.contains(at)) => {
                 if let Some((_, url)) = self.msg_links.iter().find(|(r, _)| r.contains(at)).cloned() {

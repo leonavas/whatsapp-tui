@@ -72,6 +72,9 @@ pub struct Msg {
     /// A business's title, footer and buttons around the text.
     #[serde(default)]
     pub card: Option<Card>,
+    /// Forwarded, how many times over (WhatsApp's score); 0 when not.
+    #[serde(default)]
+    pub forwarded: u32,
     /// Its media couldn't be had, here or from the phone.
     #[serde(skip)]
     pub unavailable: bool,
@@ -185,8 +188,6 @@ pub struct Profile {
     pub tz: Option<i32>,
     /// Google Maps on its address (or coordinates).
     pub maps: String,
-    /// The full-size picture on disk.
-    pub photo: String,
     pub created: i64,
     pub members: Vec<Member>,
     pub error: String,
@@ -266,6 +267,14 @@ pub enum Event {
         number: Option<Number>,
     },
     Profile(Profile),
+    /// The info panel's picture at full size, after its `Profile`; an empty
+    /// path when there's none to show, `error` when it didn't come.
+    Photo {
+        chat: String,
+        path: String,
+        #[serde(default)]
+        error: String,
+    },
     /// A profile picture on disk; an empty path when there's none.
     Avatar { chat: String, path: String },
     /// A message's media downloaded to `path`, or why it couldn't be.
@@ -279,6 +288,11 @@ pub enum Event {
     },
     /// A better picture of a downloaded video: a frame of it.
     Thumb { chat: String, id: String, path: String },
+    /// Under each chat's name in the forward dialog: a group's members, a
+    /// contact's recado.
+    ChatSubs { subs: std::collections::HashMap<String, String> },
+    /// Whether a sticker is among your favorites, asked or just changed.
+    StickerFav { chat: String, id: String, fav: bool },
     Error {
         text: String,
         #[serde(default)]

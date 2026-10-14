@@ -20,6 +20,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 /// A card: three rows inside a rounded border.
@@ -242,10 +243,12 @@ impl App {
         }
         let Some(files) = self.attach.files.remove(&chat) else { return };
         let mut caption = self.input.trim().to_string();
+        // A reply quotes with the first, as the caption goes.
+        let mut reply = self.take_reply(&chat);
         for a in files {
             self.cmd(json!({
                 "c": "send_file", "chat": chat, "path": a.path, "name": a.name,
-                "caption": std::mem::take(&mut caption), "kind": a.kind.wire(), "temp": a.temp,
+                "caption": std::mem::take(&mut caption), "kind": a.kind.wire(), "temp": a.temp, "reply": reply.take(),
             }));
             self.protocols.retain(|(k, _, _), _| *k != a.key);
         }
@@ -385,11 +388,11 @@ fn cut(s: &str, width: usize) -> String {
         return s.to_string();
     }
     let mut out = String::new();
-    for ch in s.chars() {
-        if out.width() + ch.to_string().width() + 1 > width {
+    for g in s.graphemes(true) {
+        if out.width() + g.width() + 1 > width {
             break;
         }
-        out.push(ch);
+        out.push_str(g);
     }
     out + "…"
 }

@@ -417,9 +417,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         // Half a row over it and half under: the text under those rows
         // mustn't show through around the halves.
         for row in [y - 1, y + 1] {
-            for col in x..x + w {
-                f.buffer_mut()[(col, row)].set_symbol(" ");
-            }
+            crate::ui::blank(f.buffer_mut(), Rect::new(x, row, w, 1));
         }
         draw_deco(f, app, Deco::Edge(false, w, DAY_PILL), x, y - 1);
         draw_deco(f, app, Deco::Edge(true, w, DAY_PILL), x, y + 1);
@@ -447,8 +445,8 @@ fn tabs_of(n: usize) -> usize {
 }
 
 /// Who reacted, as WhatsApp Web's box over the reactions (under them when
-/// there's no room): how many, the tabs, then each person on two rows by
-/// their picture, their emoji at the right; yours says a click takes it back.
+/// there's no room): how many, the tabs, then each person by their picture,
+/// their emoji at the right; yours says a click takes it back.
 pub fn draw_who(f: &mut Frame, app: &mut App) {
     let Some((chat, id, tab, top, hover)) = app.react_who.as_ref().map(|w| (w.chat.clone(), w.id.clone(), w.tab, w.top, w.hover.clone())) else { return };
     let msg = app.msgs.get(&chat).and_then(|l| l.iter().find(|m| m.id == id));
@@ -474,13 +472,13 @@ pub fn draw_who(f: &mut Frame, app: &mut App) {
 
     let area = app.msgs_area;
     let w = 44.min(area.width.saturating_sub(2));
-    // The header's seven rows and a blank each end; three rows a person, but the last.
-    let want = 9 + (people.len() * 3).saturating_sub(1).max(1) as u16;
-    let h = want.min(9 + 3 * 6 - 1).min(area.height);
+    // The header's seven rows and the box's foot; three rows a person.
+    let want = 8 + (people.len() * 3).max(1) as u16;
+    let h = want.min(8 + 3 * 6).min(area.height);
     if w < 24 || h < 11 {
         return;
     }
-    let shown = ((h - 9 + 1) / 3) as usize;
+    let shown = ((h - 8) / 3) as usize;
     let top = top.min(people.len().saturating_sub(shown));
     let y = if anchor.y >= area.y + h {
         anchor.y - h
@@ -537,16 +535,14 @@ pub fn draw_who(f: &mut Frame, app: &mut App) {
     lines.push(Line::from(Span::styled("─".repeat(iw), Style::new().fg(META_IN).bg(DAY_PILL))));
     lines.push(blank(bg));
 
-    // The people, two rows each and one between.
+    // The people, three rows each: the name on the middle one, by the
+    // picture centered in all three, as WhatsApp Web centers them.
     let avatar = avatar_cells(app).map(|(w, _)| w);
     let lead = avatar.map_or(2, |a| a as usize + 4);
     let mut rows = Vec::new();
     let mut faces = Vec::new();
     for (k, p) in people.iter().skip(top).take(shown).enumerate() {
         let row_y = y + 7 + k as u16 * 3;
-        if k > 0 {
-            lines.push(blank(bg));
-        }
         // Under the pointer, lit as WhatsApp Web's: a click opens their info.
         let bg = if hover.as_ref() == Some(&p.jid) { Style::new().bg(HOVER) } else { bg };
         let meta = meta.patch(bg);
@@ -558,6 +554,12 @@ pub fn draw_who(f: &mut Frame, app: &mut App) {
         let room = iw.saturating_sub(lead + p.emoji.width() + 4);
         let name = truncate(&name, room);
         let gap = iw.saturating_sub(lead + name.width() + p.emoji.width() + 3);
+        let mut air = Vec::new();
+        fill(&mut air);
+        // Yours has a line under the name: the two by a two-row picture, the air below.
+        if !p.mine {
+            lines.push(Line::from(air.clone()));
+        }
         lines.push(Line::from(vec![
             Span::styled(" ".repeat(lead), bg),
             Span::styled(name, bg.fg(TEXT)),
@@ -565,13 +567,15 @@ pub fn draw_who(f: &mut Frame, app: &mut App) {
             Span::styled(p.emoji.clone(), bg),
             Span::styled("   ", bg),
         ]));
-        let sub = if p.mine { "Clique para remover" } else { "" };
-        let mut under = vec![Span::styled(" ".repeat(lead), bg), Span::styled(sub, meta)];
-        fill(&mut under);
-        lines.push(Line::from(under));
-        rows.push((Rect::new(x, row_y, w, 2), p.clone()));
+        if p.mine {
+            let mut under = vec![Span::styled(" ".repeat(lead), bg), Span::styled("Clique para remover", meta)];
+            fill(&mut under);
+            lines.push(Line::from(under));
+        }
+        lines.push(Line::from(air));
+        rows.push((Rect::new(x, row_y, w, 3), p.clone()));
         if let Some(a) = avatar {
-            faces.push((p.jid.clone(), Rect::new(x + 2, row_y, a, 2)));
+            faces.push((p.jid.clone(), Rect::new(x + 2, row_y, a, if p.mine { 2 } else { 3 })));
         }
     }
     while lines.len() < h as usize - 1 {

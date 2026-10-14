@@ -5,6 +5,7 @@ use crate::app::{audio_of, App, Audio, AudioHit, Avatar, Filter, Focus, Item, Ph
 use crate::player::{Now, State};
 use crate::bridge::{Chat, Hours, Msg};
 use chrono::{DateTime, Datelike, FixedOffset, Local, TimeZone, Timelike, Utc};
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -12,7 +13,8 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 use image::{DynamicImage, Rgba, RgbaImage};
 use ratatui_image::{Image, Resize};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 // WhatsApp Web's dark theme; the greens follow the terminal's (`theme`).
 pub(crate) use crate::theme::{bubble_out, chip_on, chip_on_text, code_out, green, link_out, meta_out, rule_out};
@@ -27,7 +29,7 @@ const READ_BLUE: Color = Color::Rgb(0x53, 0xBD, 0xEB);
 pub(crate) const LINK_IN: Color = Color::Rgb(0x53, 0xBD, 0xEB);
 pub(crate) const DAY_PILL: Color = Color::Rgb(0x1D, 0x1F, 0x1F);
 pub(crate) const FIELD: Color = Color::Rgb(0x24, 0x26, 0x26);
-const SELECTED: Color = Color::Rgb(0x2E, 0x2F, 0x2F);
+pub(crate) const SELECTED: Color = Color::Rgb(0x2E, 0x2F, 0x2F);
 const NAMES: [Color; 8] = [
     Color::Rgb(0xE5, 0x7A, 0x5F),
     Color::Rgb(0x53, 0xBD, 0xEB),
@@ -86,7 +88,8 @@ pub(crate) enum Deco {
     /// Which corners of the cell to round: bits TL, TR, BL, BR.
     Corners(u8, Color),
     /// WhatsApp's tail, outside the bubble's top corner; true on the left.
-    Tail(bool, Color),
+    /// Raised (the last) when the bubble's padding goes over the row above.
+    Tail(bool, Color, bool),
     /// The status ticks, as `ticks()` numbers them.
     Ticks(u8, Color),
     /// An audio's button over two cells: ▶, or ⏸ when true.
@@ -96,9 +99,9 @@ pub(crate) enum Deco {
     Edge(bool, u16, Color),
 }
 
-const TL: u8 = 1;
+pub(crate) const TL: u8 = 1;
 const TR: u8 = 2;
-const BL: u8 = 4;
+pub(crate) const BL: u8 = 4;
 const BR: u8 = 8;
 
 /// One cell's size in pixels, when the terminal shows pictures.
@@ -148,13 +151,15 @@ fn deco_image(d: Deco, w: u32, h: u32) -> DynamicImage {
                 }),
             )
         }
-        Deco::Tail(left, c) => {
+        Deco::Tail(left, c, raised) => {
             // A triangle: the top edge carries on out, the slant comes back
             // to the bubble a little over half a row down.
             let th = hf * 0.55;
+            let lift = if raised { pad_px(h) as f32 } else { 0.0 };
             (
                 rgb(c),
                 Box::new(move |x, y| {
+                    let y = y + lift;
                     let edge = wf * (y / th);
                     let inside = if left { x - edge } else { (wf - edge) - x };
                     if y > th { 0.0 } else { (inside + 0.5).clamp(0.0, 1.0) }
@@ -287,20 +292,47 @@ fn draw_newest_btn(f: &mut Frame, app: &mut App, r: Rect) -> bool {
     }
     // No text under it shows around the circle; the cells keep their
     // background, a bubble's included.
-    for y in r.top()..r.bottom() {
-        for x in r.left()..r.right() {
-            f.buffer_mut()[(x, y)].set_symbol(" ");
-        }
-    }
+    blank(f.buffer_mut(), r);
     f.render_widget(Image::new(&app.protocols[&key]), r);
     true
+}
+
+/// Blanks `r` for a picture to go over, each cell keeping its background.
+/// The cells a wide char hides were reset, so they take its own; one cut
+/// by an edge goes whole, else its other half would show by the picture.
+pub(crate) fn blank(buf: &mut Buffer, r: Rect) {
+    let r = r.intersection(buf.area);
+    // A picture's escapes aren't text: one cell.
+    let cells = |b: &Buffer, x: u16, y: u16| {
+        let s = b[(x, y)].symbol();
+        if s.contains(char::is_control) { 1 } else { s.width().max(1) as u16 }
+    };
+    for y in r.top()..r.bottom() {
+        // Back to the first cell of a wide char the left edge cuts.
+        let mut x = (buf.area.left()..r.left()).rev().take(3).find(|&x| x + cells(buf, x, y) > r.left()).unwrap_or(r.left());
+        // Where the last wide char's hidden cells end, and its background.
+        let mut hid = None;
+        while x < r.right() || hid.is_some_and(|(end, _)| x < end) {
+            match hid.filter(|&(end, _)| x < end) {
+                Some((_, bg)) => {
+                    buf[(x, y)].set_bg(bg);
+                }
+                None => {
+                    let end = (x + cells(buf, x, y)).min(buf.area.right());
+                    hid = (end > x + 1).then_some((end, buf[(x, y)].bg));
+                }
+            }
+            buf[(x, y)].set_symbol(" ");
+            x += 1;
+        }
+    }
 }
 
 pub(crate) fn draw_deco(f: &mut Frame, app: &mut App, d: Deco, x: u16, y: u16) {
     let (Some((w, h)), Some(picker)) = (cell_px(app), app.picker.as_ref()) else { return };
     let (key, cols) = match d {
         Deco::Corners(m, c) => (format!("corner-{m}-{:?}", rgb(c)), 1),
-        Deco::Tail(l, c) => (format!("tail-{l}-{:?}", rgb(c)), 1),
+        Deco::Tail(l, c, r) => (format!("tail-{l}-{r}-{:?}", rgb(c)), 1),
         Deco::Ticks(s, c) => (format!("ticks-{s}-{:?}", rgb(c)), crate::ticks::CELLS),
         Deco::Play(p, c) => (format!("play-{p}-{:?}", rgb(c)), 2),
         Deco::Edge(u, n, c) => (format!("edge-{u}-{:?}", rgb(c)), n),
@@ -334,12 +366,193 @@ pub(crate) fn box_corners(top: usize, rows: usize, x: usize, w: usize, color: Co
     cells.into_iter().map(|(r, c, m)| (r, c, Deco::Corners(m, color))).collect()
 }
 
+/// The rows lit behind a bubble on screen: with padding, the rows around it
+/// too, that its padding reaches into.
+pub(crate) fn lit_rows(r: Rect, area: Rect, padded: bool) -> std::ops::Range<u16> {
+    if padded {
+        r.y.saturating_sub(1).max(area.y)..(r.bottom() + 1).min(area.bottom())
+    } else {
+        r.y..r.bottom()
+    }
+}
+
+/// A bubble's padding over and under its text, in pixels: a third of a row.
+fn pad_px(h: u32) -> u32 {
+    (h as f32 / 3.0).round() as u32
+}
+
+/// A bubble's padding over part of a row, in a run of cells: its color,
+/// whether the run's ends are its rounded corners, and the tail's cell at
+/// the run's left (true) or right end.
+type Piece = ([u8; 3], bool, bool, Option<bool>);
+
+/// A bubble's padding over a row next to it, cells [from, to): `under` it
+/// (the row's upper part) or over it (the lower part, with the tail).
+struct Band {
+    row: usize,
+    under: bool,
+    from: usize,
+    to: usize,
+    color: Color,
+    round: (bool, bool),
+    tail: Option<bool>,
+}
+
+/// How much of the pixel (px, py) a box over [x0, x1] × [y0, y1] covers,
+/// its corners rounded by `r` at the ends asked, at its top or its bottom.
+fn box_cover((px, py): (f32, f32), (x0, x1, y0, y1): (f32, f32, f32, f32), r: f32, (left, right): (bool, bool), top: bool) -> f32 {
+    let mut a = ((px - x0).min(x1 - px).min(py - y0).min(y1 - py) + 0.5).clamp(0.0, 1.0);
+    let cy = if top { y0 + r } else { y1 - r };
+    let out_y = if top { py < cy } else { py > cy };
+    for (on, cx, out_x) in [(left, x0 + r, px < x0 + r), (right, x1 - r, px > x1 - r)] {
+        if on && out_x && out_y {
+            let d = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt();
+            a = a.min((r - d + 0.5).clamp(0.0, 1.0));
+        }
+    }
+    a
+}
+
+/// A row's padding over `cols` cells: the end of the bubble above it in
+/// its upper part, the start of the one under it in its lower part.
+fn pad_picture(under: Option<Piece>, over: Option<Piece>, w: u32, h: u32, cols: u16) -> DynamicImage {
+    let (cw, wf, hf) = (w as f32, (w * cols as u32) as f32, h as f32);
+    let ph = pad_px(h) as f32;
+    let r = ph.min(cw);
+    let mut img = RgbaImage::new(w * cols as u32, h);
+    for (x, y, p) in img.enumerate_pixels_mut() {
+        let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+        let (piece, y0, y1) = if py < hf / 2.0 { (under, 0.0, ph) } else { (over, hf - ph, hf) };
+        let Some((color, l, rt, tail)) = piece else { continue };
+        let x0 = if tail == Some(true) { cw } else { 0.0 };
+        let x1 = if tail == Some(false) { wf - cw } else { wf };
+        let a = if px < x0 || px > x1 {
+            // The tail's top, as `Deco::Tail` draws the rest in the row under.
+            let (tx, ty) = (if px < x0 { px } else { px - x1 }, py - y0);
+            let edge = cw * (ty / (hf * 0.55));
+            let inside = if px < x0 { tx - edge } else { (cw - edge) - tx };
+            (inside.min(ty) + 0.5).clamp(0.0, 1.0)
+        } else {
+            box_cover((px, py), (x0, x1, y0, y1), r, (l, rt), py >= hf / 2.0)
+        };
+        *p = Rgba([color[0], color[1], color[2], (255.0 * a) as u8]);
+    }
+    DynamicImage::ImageRgba8(img)
+}
+
+fn draw_pad(f: &mut Frame, app: &mut App, under: Option<Piece>, over: Option<Piece>, x: u16, y: u16, cols: u16) {
+    let (Some((w, h)), Some(picker)) = (cell_px(app), app.picker.as_ref()) else { return };
+    let key = (format!("pad-{under:?}-{over:?}"), cols, 1);
+    if !app.protocols.contains_key(&key) {
+        let Ok(p) = picker.new_protocol(pad_picture(under, over, w, h, cols), Rect::new(0, 0, cols, 1).into(), Resize::Fit(None)) else { return };
+        app.protocols.insert(key.clone(), p);
+    }
+    f.render_widget(Image::new(&app.protocols[&key]), Rect::new(x, y, cols, 1));
+}
+
+/// The bubbles' padding, with pictures: a third of a row in each bubble's
+/// color over the row above it and the row under it, its corners and tail
+/// out there, so the text has room as on WhatsApp Web. No rows are added:
+/// those are the blank ones between bubbles. Where that row isn't shown,
+/// the bubble's own rows round, as without padding. `rows` are the first
+/// shown, the one past the last and all of them; `below`: the row under
+/// the conversation is bare, for the newest bubble's.
+fn draw_pads(f: &mut Frame, app: &mut App, spots: &[Spot], area: Rect, (start, end, total): (usize, usize, usize), top_pad: u16, below: bool) {
+    if cell_px(app).is_none() {
+        return;
+    }
+    let shown = |row: usize| row >= start && row < end;
+    let y_of = |row: usize| area.y + top_pad + (row - start) as u16;
+    let mut bands: Vec<Band> = Vec::new();
+    for s in spots {
+        let Some((color, tail)) = s.pad else { continue };
+        if s.w < 2 || s.x + s.w + 1 > area.width as usize {
+            continue;
+        }
+        let last = s.top + s.rows - 1;
+        let over = s.top.checked_sub(1).filter(|&r| shown(r));
+        let under = Some(s.top + s.rows).filter(|&r| shown(r) || (below && r == total && end == total));
+        // On the tail's side the top corner stays square; so do those the padding takes.
+        let mut square = match (tail, s.from_me) {
+            (true, false) => TL,
+            (true, true) => TR,
+            _ => 0,
+        };
+        if over.is_some() {
+            square |= TL | TR;
+        }
+        if under.is_some() {
+            square |= BL | BR;
+        }
+        let corners = box_corners(s.top, s.rows, s.x, s.w, color, square);
+        let edges = [(s.top, s.x), (s.top, s.x + s.w - 1), (last, s.x), (last, s.x + s.w - 1)];
+        for &(row, col) in edges.iter().take(if s.rows == 1 { 2 } else { 4 }) {
+            if !shown(row) {
+                continue;
+            }
+            match corners.iter().find(|c| c.0 == row && c.1 == col) {
+                Some(&(_, _, d)) => draw_deco(f, app, d, area.x + col as u16, y_of(row)),
+                // Square, the cell left bare for a corner takes the bubble's color.
+                None => {
+                    f.buffer_mut()[(area.x + col as u16, y_of(row))].set_bg(color);
+                }
+            }
+        }
+        if tail && shown(s.top) {
+            let col = if s.from_me { s.x + s.w } else { s.x - 1 };
+            draw_deco(f, app, Deco::Tail(!s.from_me, color, over.is_some()), area.x + col as u16, y_of(s.top));
+        }
+        if let Some(row) = over {
+            let (from, to) = match (tail, s.from_me) {
+                (true, false) => (s.x - 1, s.x + s.w),
+                (true, true) => (s.x, s.x + s.w + 1),
+                _ => (s.x, s.x + s.w),
+            };
+            let round = (!tail || s.from_me, !tail || !s.from_me);
+            bands.push(Band { row, under: false, from, to, color, round, tail: tail.then_some(!s.from_me) });
+        }
+        if let Some(row) = under {
+            // The reactions' pill sits on it: the padding goes around.
+            let (a, b) = (s.x, s.x + s.w);
+            let cut = s.pill.filter(|p| p.0 == row).map(|(_, c, w)| (c.clamp(a, b), (c + w).clamp(a, b)));
+            let pieces = match cut {
+                Some((c, d)) => [(a, c, (true, c == b)), (d, b, (d == a, true))],
+                None => [(a, b, (true, true)), (b, b, (false, false))],
+            };
+            for (from, to, round) in pieces.into_iter().filter(|p| p.0 < p.1) {
+                bands.push(Band { row, under: true, from, to, color, round, tail: None });
+            }
+        }
+    }
+    // Each row's in runs of cells the same bands cover: a picture each.
+    bands.sort_by_key(|b| b.row);
+    for row in bands.chunk_by(|a, b| a.row == b.row) {
+        let y = y_of(row[0].row);
+        let mut cuts: Vec<usize> = row.iter().flat_map(|b| [b.from, b.to]).collect();
+        cuts.sort_unstable();
+        cuts.dedup();
+        for run in cuts.windows(2) {
+            let (a, b) = (run[0], run[1]);
+            let piece = |under: bool| {
+                row.iter().find(|x| x.under == under && x.from <= a && b <= x.to).map(|x| {
+                    let tail = x.tail.filter(|&left| if left { a == x.from } else { b == x.to });
+                    (rgb(x.color), x.round.0 && a == x.from, x.round.1 && b == x.to, tail)
+                })
+            };
+            let (under, over) = (piece(true), piece(false));
+            if under.is_some() || over.is_some() {
+                draw_pad(f, app, under, over, area.x + a as u16, y, (b - a) as u16);
+            }
+        }
+    }
+}
+
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let cached = !app.chats.is_empty() && matches!(app.phase, Phase::Starting | Phase::Connecting);
     if app.phase == Phase::Ready || cached {
         // The media viewer covers it all.
-        if crate::viewer::draw(f, app) {
+        if crate::viewer::draw(f, app) || crate::photo::draw(f, app) {
             return;
         }
         return main_view(f, app, area);
@@ -494,14 +707,18 @@ pub(crate) fn draw_avatar(f: &mut Frame, app: &mut App, jid: &str, group: bool, 
 
 fn main_view(f: &mut Frame, app: &mut App, area: Rect) {
     let body = area;
-    let side_w = (body.width * 3 / 10).clamp(32, 48).min(body.width / 2);
+    // As dragged (`divider`); down to the pictures, its own narrow list.
+    let side_w = crate::divider::side_width(app, body.width);
     let [side, sep, conv] = Layout::horizontal([Constraint::Length(side_w), Constraint::Length(1), Constraint::Min(1)]).areas(body);
     // Your account at the foot of the chat list, as in slick.
     let [side, account] = Layout::vertical([Constraint::Min(1), Constraint::Length(crate::account::BUTTON_H)]).areas(side);
-    sidebar(f, app, side);
+    if app.side_compact() {
+        crate::divider::sidebar(f, app, side);
+    } else {
+        sidebar(f, app, side);
+    }
     crate::account::button(f, app, account);
-    let bar: Vec<Line> = (0..sep.height).map(|_| Line::from("│").style(dim())).collect();
-    f.render_widget(Paragraph::new(bar), sep);
+    crate::divider::draw_bar(f, app, body, sep);
     // The info panel takes the right, as slick's profile does, and the
     // conversation stays beside it; too narrow for both, it covers it.
     app.panel_area = Rect::default();
@@ -510,6 +727,7 @@ fn main_view(f: &mut Frame, app: &mut App, area: Rect) {
     app.panel_week = Rect::default();
     app.panel_maps = Rect::default();
     app.msg_links.clear();
+    app.more_hits.clear();
     app.audio_hits.clear();
     app.media_hits.clear();
     match app.profile.as_ref().map(|_| panel_width(conv.width)) {
@@ -528,6 +746,7 @@ fn main_view(f: &mut Frame, app: &mut App, area: Rect) {
             profile_panel(f, app, conv, false);
         }
     }
+    crate::divider::draw_tip(f, app);
     crate::react::draw(f, app);
     crate::react::draw_who(f, app);
     crate::msgmenu::draw(f, app);
@@ -949,6 +1168,11 @@ fn chat_item(c: &Chat, width: usize, avatar: Option<u16>, lit: bool, typing: boo
 /// A sticker's height in rows: about WhatsApp Web's 190 px.
 const STICKER_ROWS: u16 = 7;
 
+/// A long text's rows shown before "Ler mais", as WhatsApp Web cuts it;
+/// not cut when it'd hide no more than `MORE_SLACK` rows.
+const MORE_ROWS: usize = 18;
+const MORE_SLACK: usize = 3;
+
 /// How long a message gone to stays lit, the last of it fading.
 const FLASH_SECS: f32 = 2.5;
 const FADE_SECS: f32 = 1.0;
@@ -979,7 +1203,7 @@ fn conversation(f: &mut Frame, app: &mut App, area: Rect) {
     let input_h = if selecting {
         3
     } else if read_only.is_empty() {
-        input_lines(&app.input, area.width.saturating_sub(8) as usize).len().clamp(1, 6) as u16 + 4 + crate::attach::rows(app) + editing
+        input_lines(&app.input, area.width.saturating_sub(8) as usize).len().clamp(1, 6) as u16 + 4 + crate::attach::rows(app) + crate::msgmenu::reply_rows(app, area.width) + editing
     } else {
         3
     };
@@ -1036,7 +1260,7 @@ fn conversation(f: &mut Frame, app: &mut App, area: Rect) {
     let now = app.player.now.as_ref().filter(|n| n.chat == jid);
     // In a group, the sender's picture by their first bubble, as WhatsApp Web shows it.
     let faces = cells.filter(|_| group && app.settings.on(crate::config::PHOTOS)).map(|(w, _)| w);
-    let (lines, decos, starts, bigs, links, audios, pics, senders, spots) = message_lines(msgs, msgs_area.width as usize, group, faces, cell_px(app), now);
+    let (lines, decos, starts, bigs, links, audios, pics, senders, spots) = message_lines(msgs, msgs_area.width as usize, group, faces, cell_px(app), now, &|id: &str| app.expanded.contains(&(jid.clone(), id.to_string())));
     let h = msgs_area.height as usize;
     // From a search result: that message in the middle of the screen.
     if let Some(id) = app.jump.clone().filter(|_| loaded) {
@@ -1057,6 +1281,8 @@ fn conversation(f: &mut Frame, app: &mut App, area: Rect) {
             draw_deco(f, app, d, msgs_area.x + col as u16, msgs_area.y + top_pad + (row - start) as u16);
         }
     }
+    // The message box's top row is bare but while selecting or editing.
+    draw_pads(f, app, &spots, msgs_area, (start, end, lines.len()), top_pad, !selecting && editing == 0);
     for (row, col, w, url) in links {
         if row >= start && row < end && col < msgs_area.width as usize {
             let w = w.min(msgs_area.width as usize - col) as u16;
@@ -1104,6 +1330,10 @@ fn conversation(f: &mut Frame, app: &mut App, area: Rect) {
             let w = w.min(msgs_area.width as usize - col) as u16;
             app.sender_hits.push((Rect::new(msgs_area.x + col as u16, y_of(row), w, 1), s.sender.clone()));
         }
+        if let Some((row, col, w, grow)) = s.more.filter(|&(row, col, ..)| row >= start && row < end && col < msgs_area.width as usize) {
+            let w = w.min(msgs_area.width as usize - col) as u16;
+            app.more_hits.push((Rect::new(msgs_area.x + col as u16, y_of(row), w, 1), s.id.clone(), grow));
+        }
         let (a, b) = (s.top.max(start), (s.top + s.rows).min(end));
         if a >= b || s.x >= msgs_area.width as usize {
             continue;
@@ -1123,11 +1353,12 @@ fn conversation(f: &mut Frame, app: &mut App, area: Rect) {
     // Web does, fading after a couple of seconds.
     if let Some((id, at)) = app.flash.clone() {
         let t = at.elapsed().as_secs_f32();
+        let padded = cell_px(app).is_some();
         match app.bubbles.iter().find(|h| h.id == id).map(|h| h.rect) {
             _ if t >= FLASH_SECS => app.flash = None,
             Some(r) => {
                 let glow = crate::theme::glow(((FLASH_SECS - t) / FADE_SECS).min(1.0));
-                for y in r.y..r.bottom() {
+                for y in lit_rows(r, msgs_area, padded) {
                     for x in msgs_area.left()..msgs_area.right() {
                         let cell = &mut f.buffer_mut()[(x, y)];
                         if cell.bg == Color::Reset {
@@ -1199,8 +1430,9 @@ fn input_box(f: &mut Frame, app: &mut App, area: Rect) {
     let x = area.x + 1;
     let rows: Vec<String> = if app.input.is_empty() { vec![String::new()] } else { input_lines(&app.input, width) };
     let (crow, ccol) = caret_pos(&app.input, app.caret, width);
-    // The attached files' cards sit over the text, inside the field.
-    let strip = crate::attach::rows(app);
+    // The reply and the attached files' cards sit over the text, inside the field.
+    let reply = crate::msgmenu::reply_rows(app, area.width);
+    let strip = reply + crate::attach::rows(app);
     let h = (area.height as usize).saturating_sub(4 + strip as usize).max(1);
     let first = (crow + 1).saturating_sub(h);
 
@@ -1252,8 +1484,11 @@ fn input_box(f: &mut Frame, app: &mut App, area: Rect) {
             draw_deco(f, app, d, x + col as u16, area.y + row as u16);
         }
     }
-    if strip > 0 {
-        crate::attach::draw_strip(f, app, Rect::new(x + 3, area.y + 2, (box_w as u16).saturating_sub(6), strip - 1));
+    if reply > 0 {
+        crate::msgmenu::draw_reply(f, app, Rect::new(x + 2, area.y + 2, (box_w as u16).saturating_sub(4), reply - 1));
+    }
+    if strip > reply {
+        crate::attach::draw_strip(f, app, Rect::new(x + 3, area.y + 2 + reply, (box_w as u16).saturating_sub(6), strip - reply - 1));
     }
     let text_y = area.y + 2 + strip;
     app.attach_btn = Rect::new(x + 2, text_y, 3, 1);
@@ -1263,38 +1498,41 @@ fn input_box(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-/// The message box breaks lines by width at any char: easy to put the caret on.
+/// The message box breaks lines by width at any grapheme: easy to put the caret on.
 fn input_lines(s: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut out = vec![String::new()];
     let mut w = 0;
-    for ch in s.chars() {
-        if ch == '\n' {
+    for (g, cw) in clusters(s) {
+        if g == "\n" {
             out.push(String::new());
             w = 0;
             continue;
         }
-        let cw = ch.width().unwrap_or(0);
         if w + cw > width {
             out.push(String::new());
             w = 0;
         }
-        out.last_mut().unwrap().push(ch);
+        out.last_mut().unwrap().push_str(g);
         w += cw;
     }
     out
 }
 
+/// Where the caret, in chars, shows; inside a grapheme, past it.
 pub(crate) fn caret_pos(s: &str, caret: usize, width: usize) -> (usize, usize) {
     let width = width.max(1);
-    let (mut row, mut col) = (0, 0);
-    for ch in s.chars().take(caret) {
-        if ch == '\n' {
+    let (mut row, mut col, mut n) = (0, 0, 0);
+    for (g, cw) in clusters(s) {
+        if n >= caret {
+            break;
+        }
+        n += g.chars().count();
+        if g == "\n" {
             row += 1;
             col = 0;
             continue;
         }
-        let cw = ch.width().unwrap_or(0);
         if col + cw > width {
             row += 1;
             col = 0;
@@ -1309,14 +1547,15 @@ pub(crate) fn caret_pos(s: &str, caret: usize, width: usize) -> (usize, usize) {
 }
 
 /// The color a group gives a member's name, theirs in every message and quote.
-fn name_color(jid: &str) -> Color {
+pub(crate) fn name_color(jid: &str) -> Color {
     NAMES[jid.bytes().fold(0usize, |h, b| h.wrapping_mul(31).wrapping_add(b as usize)) % NAMES.len()]
 }
 
 /// The conversation as bubbles, a blank row between them. With pictures
 /// in the terminal their corners are rounded and the first of each run of
-/// one sender's messages has WhatsApp's tail, on its side: the returned
-/// (row, col, deco) say where those pictures go. A message of only emojis
+/// one sender's messages has WhatsApp's tail, on its side, drawn with their
+/// padding from the spots (`draw_pads`); the returned (row, col, deco) say
+/// where the other pictures go. A message of only emojis
 /// goes without a bubble, big, as (row, col, size, text).
 /// Then the links' pieces, a row each, as (row, col, width, url); then
 /// the audio players; the photos and videos; last, in a group, the
@@ -1349,6 +1588,11 @@ struct Spot {
     sender: String,
     /// The reactions' pill under it, as (row, col, width): a click shows who reacted.
     pill: Option<(usize, usize, usize)>,
+    /// Its "Ler mais", as (row, col, width, rows it grows by opened).
+    more: Option<(usize, usize, usize, usize)>,
+    /// A bubble's color and whether it has the tail, for its padding; None
+    /// for big emojis and stickers.
+    pad: Option<(Color, bool)>,
 }
 
 /// An audio bubble's player: its first row and where its icon, button and
@@ -1433,7 +1677,8 @@ fn audio_rows(a: &Audio, now: Option<&Now>, from_me: bool, bg: Color, meta_fg: C
 /// Also where each message starts, by id. `cell` is a cell's pixels, when
 /// the terminal shows pictures; `now`, the open chat's audio playing.
 /// `faces`: the width of the pictures by a group's bubbles, None without them.
-fn message_lines(msgs: &[Msg], width: usize, group: bool, faces: Option<u16>, cell: Option<(u32, u32)>, now: Option<&Now>) -> Bubbles {
+/// `opened`: a long message opened past its "Ler mais".
+fn message_lines(msgs: &[Msg], width: usize, group: bool, faces: Option<u16>, cell: Option<(u32, u32)>, now: Option<&Now>, opened: &dyn Fn(&str) -> bool) -> Bubbles {
     let mut out: Vec<Line<'static>> = Vec::new();
     let mut decos = Vec::new();
     let mut starts = Vec::new();
@@ -1478,7 +1723,7 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, faces: Option<u16>, ce
 
         // Only emojis: big, the time in a pill under their right end. A
         // sticker goes the same way, its picture without a bubble.
-        let big = cell.filter(|_| m.quote.is_empty()).and_then(|c| crate::bigemoji::cells(&m.text, c)).map(|(w, h)| (w as usize, h, None));
+        let big = cell.filter(|_| m.quote.is_empty() && m.forwarded == 0).and_then(|c| crate::bigemoji::cells(&m.text, c)).map(|(w, h)| (w as usize, h, None));
         let sticker = cell.and_then(|(cw, ch)| {
             let md = m.media.as_ref().filter(|md| md.kind == "sticker")?;
             let cols = (STICKER_ROWS as f64 * ch as f64 / cw.max(1) as f64).round() as usize;
@@ -1516,7 +1761,7 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, faces: Option<u16>, ce
             out.push(Line::from(spans));
             let (sx, sw) = (ex.min(px), (ex + ew).max(px + pw) - ex.min(px));
             let top = out.len() - 1 - eh as usize;
-            spots.push(Spot { id: m.id.clone(), top, rows: eh as usize + 1, x: sx, w: sw, from_me: m.from_me, quote: None, name: name_at, sender: m.sender.clone(), pill: None });
+            spots.push(Spot { id: m.id.clone(), top, rows: eh as usize + 1, x: sx, w: sw, from_me: m.from_me, quote: None, name: name_at, sender: m.sender.clone(), pill: None, more: None, pad: None });
             push_reactions(&mut out, &mut spots, m, sx, sw, width);
             prev_sender = Some(m.sender.as_str());
             continue;
@@ -1533,6 +1778,11 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, faces: Option<u16>, ce
             let shown = truncate(&m.sender_name, inner);
             name_w = Some(shown.width());
             rows.push(vec![Span::styled(shown, Style::new().fg(who_color).bg(bg).add_modifier(Modifier::BOLD))]);
+        }
+        // Forwarded: WhatsApp's label in italics, over the rest.
+        if m.forwarded > 0 {
+            let label = if m.forwarded >= crate::forward::OFTEN { "Encaminhada com frequência" } else { "Encaminhada" };
+            rows.push(vec![Span::styled(truncate(&format!("{} {label}", crate::forward::LABEL), inner), meta.add_modifier(Modifier::ITALIC))]);
         }
         // A quote in a box of its own, as WhatsApp Web's: a bar in its
         // author's color, their name, then up to two lines of it.
@@ -1575,6 +1825,7 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, faces: Option<u16>, ce
         // An audio is a player, not its text.
         let audio = audio_of(m);
         let mut player = None;
+        let mut more = None;
         let n_text = if media.is_some() && text.is_empty() {
             0
         } else if let Some(a) = &audio {
@@ -1591,7 +1842,19 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, faces: Option<u16>, ce
             let mention = Style::new().fg(if m.from_me { link_out() } else { green() }).bg(bg);
             let looks = crate::markup::Looks { base: body, link, mention, shade: if m.from_me { code_out() } else { CODE_IN }, dim: meta_fg };
             let (text, at) = crate::markup::mentions(text, &m.mentions);
-            let (text, found) = crate::markup::rows(&text, wrap, &looks, &at);
+            let (mut text, mut found) = crate::markup::rows(&text, wrap, &looks, &at);
+            // A long one cut on a row, "… Ler mais" under it, until that's clicked.
+            if text.len() > MORE_ROWS + MORE_SLACK && !opened(&m.id) {
+                let (full, full_w) = (text.len(), text.last().map_or(0, |r| row_width(r)));
+                text.truncate(MORE_ROWS);
+                while text.last().is_some_and(|r| r.iter().all(|s| s.content.trim().is_empty())) {
+                    text.pop();
+                }
+                found.retain(|&(r, ..)| r < text.len());
+                let dots = "… ";
+                more = Some((rows.len() + text.len(), dots.width(), "Ler mais".width(), full - text.len() - 1, full_w));
+                text.push(vec![Span::styled(dots, body), Span::styled("Ler mais", mention)]);
+            }
             pieces.extend(found.into_iter().map(|(r, c, w, url)| (rows.len() + r, c, w, url)));
             let n_text = text.len();
             rows.extend(text);
@@ -1634,6 +1897,13 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, faces: Option<u16>, ce
         let bw = content_w + 3;
         // A column kept free on the tail's side.
         let x = if m.from_me { width.saturating_sub(bw + 2) } else { left };
+        // Opened, it grows by the rows hidden; by one more if its last row
+        // leaves the time no room, one less the other way round.
+        let more = more.map(|(row, col, w, hidden, full_w): (usize, usize, usize, usize, usize)| {
+            let last = row + 1 == rows.len();
+            let fits = full_w + 2 + footer_w <= wrap;
+            (row, col, w, hidden + usize::from(last && inline && !fits) - usize::from(last && !inline && fits))
+        });
         if !inline {
             let mut r = vec![Span::styled(" ".repeat(content_w - footer_w), body)];
             r.extend(footer.clone());
@@ -1688,24 +1958,14 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, faces: Option<u16>, ce
             spans.push(Span::styled(" ", edge(i, false)));
             out.push(Line::from(spans));
         }
+        // Its corners and tail go with its padding, as it's drawn (`draw_pads`).
         if rounded {
-            // On the tail's side the top corner stays square.
-            let square = match (first, m.from_me) {
-                (true, false) => TL,
-                (true, true) => TR,
-                _ => 0,
-            };
-            decos.extend(box_corners(top, n, x, bw, bg, square));
             if !quote_rows.is_empty() {
                 // The bar's side stays square.
                 decos.extend(box_corners(top + quote_rows.start, quote_rows.len(), x + 1, content_w, quote_bg, TL | BL));
             }
             if m.from_me {
                 decos.push((top + footer_row, x + 1 + content_w - crate::ticks::CELLS as usize, Deco::Ticks(m.status, tick_color)));
-            }
-            if first {
-                let col = if m.from_me { x + bw } else { x - 1 };
-                decos.push((top, col, Deco::Tail(!m.from_me, bg)));
             }
         }
         link_cells.extend(pieces.into_iter().map(|(r, c, w, url)| (top + r, x + 1 + c, w, url)));
@@ -1736,7 +1996,7 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, faces: Option<u16>, ce
         }
         let quote = (!quote_rows.is_empty()).then(|| (top + quote_rows.start, quote_rows.len()));
         let name = name_w.map(|w| (top, x + 1, w));
-        spots.push(Spot { id: m.id.clone(), top, rows: n, x, w: bw, from_me: m.from_me, quote, name, sender: m.sender.clone(), pill: None });
+        spots.push(Spot { id: m.id.clone(), top, rows: n, x, w: bw, from_me: m.from_me, quote, name, sender: m.sender.clone(), pill: None, more: more.map(|(r, c, w, grow)| (top + r, x + 1 + c, w, grow)), pad: Some((bg, first)) });
         push_reactions(&mut out, &mut spots, m, x, bw, width);
         prev_sender = Some(m.sender.as_str());
     }
@@ -1783,6 +2043,9 @@ enum Pic {
 /// between them; over it, the sidebar's line is enough.
 fn profile_panel(f: &mut Frame, app: &mut App, area: Rect, beside: bool) {
     app.panel_area = area;
+    if let Some(v) = app.profile.as_mut() {
+        v.pic_area = Rect::default();
+    }
     let Some(view) = app.profile.as_ref() else { return };
     let chat = view.chat.clone();
     let group = chat.ends_with("@g.us");
@@ -1843,9 +2106,11 @@ fn profile_panel(f: &mut Frame, app: &mut App, area: Rect, beside: bool) {
             lines.push(center_line("Carregando…".into(), meta));
         }
         Some(d) => {
-            let name = display_name(if d.name.is_empty() { &fallback } else { &d.name }, &chat);
+            // A hidden number's (@lid) number, when the bridge knows it.
+            let who = if d.phone.is_empty() { chat.clone() } else { format!("{}@s.whatsapp.net", d.phone) };
+            let name = display_name(if d.name.is_empty() { &fallback } else { &d.name }, &who);
             lines.push(center_line(name.clone(), text.bold()));
-            let number = phone(&chat);
+            let number = phone(&who);
             if group {
                 lines.push(center_line(format!("Grupo · {} membros", d.members.len()), meta));
             } else if !number.is_empty() && number != name {
@@ -2029,7 +2294,13 @@ fn profile_panel(f: &mut Frame, app: &mut App, area: Rect, beside: bool) {
         let rect = Rect::new(body.x + x, body.y + (row - scroll) as u16, cw, ch);
         match pic {
             Pic::Member(jid) => draw_avatar(f, app, &jid, false, rect),
-            Pic::Big => draw_big_picture(f, app, &chat, group, rect),
+            Pic::Big => {
+                draw_big_picture(f, app, &chat, group, rect);
+                // A click opens it big.
+                if let Some(v) = app.profile.as_mut() {
+                    v.pic_area = rect;
+                }
+            }
         }
     }
 }
@@ -2247,6 +2518,12 @@ pub(crate) fn phone(jid: &str) -> String {
     format!("+{user}")
 }
 
+/// `s` by grapheme, each with its width as the terminal draws it: an emoji
+/// of several chars joined is one, two cells wide, never cut apart.
+pub(crate) fn clusters(s: &str) -> impl Iterator<Item = (&str, usize)> {
+    s.graphemes(true).map(|g| (g, g.width()))
+}
+
 /// Greedy word wrap by display width; words longer than a line are split.
 pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
     wrap_indexed(text, width).into_iter().map(|(l, _)| l).collect()
@@ -2271,15 +2548,15 @@ pub(crate) fn wrap_indexed(text: &str, width: usize) -> Vec<(String, Vec<usize>)
                 line.1.push(i - 1);
                 w += 1;
             }
-            for ch in word.chars() {
-                let cw = ch.width().unwrap_or(0);
+            for (g, cw) in clusters(word) {
                 if w + cw > width {
                     out.push(std::mem::take(&mut line));
                     w = 0;
                 }
-                line.0.push(ch);
-                line.1.push(i);
-                i += 1;
+                let n = g.chars().count();
+                line.0.push_str(g);
+                line.1.extend(i..i + n);
+                i += n;
                 w += cw;
             }
             // Past the space after it, or the paragraph's newline.
@@ -2296,12 +2573,11 @@ pub(crate) fn truncate(s: &str, width: usize) -> String {
     }
     let mut out = String::new();
     let mut w = 0;
-    for ch in s.chars() {
-        let cw = ch.width().unwrap_or(0);
+    for (g, cw) in clusters(s) {
         if w + cw + 1 > width {
             break;
         }
-        out.push(ch);
+        out.push_str(g);
         w += cw;
     }
     out.push('…');

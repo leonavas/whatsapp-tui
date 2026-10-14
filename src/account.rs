@@ -555,6 +555,19 @@ pub fn button(f: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::new().borders(Borders::TOP).border_style(dim());
     let inner = block.inner(area);
     f.render_widget(block, area);
+    // The list down to its pictures (`divider`): yours alone, in line with
+    // theirs, and a green arrow beside it for a newer version.
+    if app.side_compact() && inner.height >= 2 {
+        app.account.button = inner;
+        let (jid, name) = (app.my_jid(), my_name(app));
+        crate::divider::face(f, app, jid.as_deref(), &name, false, inner.x + 2, inner.y);
+        if app.account.update.is_some() {
+            let r = Rect::new(inner.x + 2 + crate::divider::slot(app), inner.y, 1, 1).intersection(inner);
+            f.render_widget(Paragraph::new(Span::styled("↑", Style::new().fg(green()).bold())), r);
+            app.account.update_btn = r;
+        }
+        return;
+    }
     if inner.height < 2 || inner.width < 8 {
         return;
     }

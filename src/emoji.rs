@@ -12,6 +12,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 use std::collections::HashMap;
 use std::sync::OnceLock;
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 /// Matches offered at most.
@@ -162,11 +163,11 @@ fn truncate(s: &str, width: usize) -> String {
         return s.to_string();
     }
     let mut out = String::new();
-    for ch in s.chars() {
-        if out.width() + ch.to_string().width() + 1 > width {
+    for g in s.graphemes(true) {
+        if out.width() + g.width() + 1 > width {
             break;
         }
-        out.push(ch);
+        out.push_str(g);
     }
     out + "…"
 }

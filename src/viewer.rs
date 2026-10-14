@@ -17,9 +17,9 @@ use serde_json::json;
 use unicode_width::UnicodeWidthStr;
 
 /// WhatsApp Web's viewer, near black.
-const BACKDROP: Color = Color::Rgb(0x0B, 0x0E, 0x0F);
+pub(crate) const BACKDROP: Color = Color::Rgb(0x0B, 0x0E, 0x0F);
 /// A key's chip, as in "Atalhos de teclado".
-const KEY: Color = Color::Rgb(0x3B, 0x3E, 0x3E);
+pub(crate) const KEY: Color = Color::Rgb(0x3B, 0x3E, 0x3E);
 /// The most a video is blown up past its own pixels; photos and stickers
 /// show at most at their real size.
 const MOST_ZOOM: u32 = 2;
@@ -49,6 +49,10 @@ pub struct View {
     bar: Rect,
     /// The top bar's hints, as `HINTS` has them.
     btns: [Rect; 4],
+    /// A sticker's place among your favorites, once the bridge says; its
+    /// hint (`f`) goes before the others.
+    fav: Option<bool>,
+    fav_btn: Rect,
 }
 
 /// The top bar's keys, as slick's viewer has them.
@@ -67,8 +71,12 @@ impl App {
         if file.is_none() {
             self.cmd(json!({"c": "download", "chat": chat, "id": id}));
         }
+        let sticker = self.msgs.get(chat).and_then(|l| l.iter().find(|m| m.id == id)).and_then(|m| m.media.as_ref()).is_some_and(|md| md.kind == "sticker");
+        if sticker {
+            self.cmd(json!({"c": "sticker_fav", "chat": chat, "id": id}));
+        }
         let none = Rect::default();
-        self.viewer = Some(View { chat: chat.into(), id: id.into(), video, gif, state, media: none, bar: none, btns: [none; 4] });
+        self.viewer = Some(View { chat: chat.into(), id: id.into(), video, gif, state, media: none, bar: none, btns: [none; 4], fav: None, fav_btn: none });
     }
 
     pub(crate) fn close_viewer(&mut self) {
@@ -86,6 +94,24 @@ impl App {
             return self.note(error);
         }
         v.state = if v.video { State::Starting } else { State::Idle };
+    }
+
+    /// The bridge's word on the viewer's sticker: a favorite or not.
+    pub(crate) fn viewer_fav_state(&mut self, chat: &str, id: &str, fav: bool) {
+        if let Some(v) = self.viewer.as_mut().filter(|v| v.chat == chat && v.id == id) {
+            v.fav = Some(fav);
+        }
+    }
+
+    /// `f`: the sticker added to your favorites, or taken out, as WhatsApp
+    /// Web's "Adicionar às favoritas"; the other devices follow.
+    fn viewer_fav(&mut self) {
+        let Some(v) = self.viewer.as_mut() else { return };
+        let Some(on) = v.fav else { return };
+        v.fav = Some(!on);
+        let action = if on { "unfavorite" } else { "favorite" };
+        let (chat, id) = (v.chat.clone(), v.id.clone());
+        self.cmd(json!({"c": "sticker_fav", "chat": chat, "id": id, "action": action}));
     }
 
     /// Play, or stop back to its picture.
@@ -230,6 +256,7 @@ impl App {
             KeyCode::Char('o') => self.viewer_outside(),
             KeyCode::Char('b' | 'd') => self.viewer_save(false),
             KeyCode::Char('p') => self.viewer_save(true),
+            KeyCode::Char('f') => self.viewer_fav(),
             _ => {}
         }
         true
@@ -247,7 +274,9 @@ impl App {
         }
         let at = Position::new(m.column, m.row);
         let hit = v.btns.iter().position(|r| r.contains(at));
-        if let Some(i) = hit {
+        if v.fav_btn.contains(at) {
+            self.viewer_fav();
+        } else if let Some(i) = hit {
             match i {
                 0 => self.viewer_save(false),
                 1 => self.viewer_save(true),
@@ -267,7 +296,7 @@ impl App {
 /// show (the message is gone), and it's closed.
 pub fn draw(f: &mut Frame, app: &mut App) -> bool {
     let Some(v) = app.viewer.as_ref() else { return false };
-    let (chat, id, video, gif, state) = (v.chat.clone(), v.id.clone(), v.video, v.gif, v.state);
+    let (chat, id, video, gif, state, fav) = (v.chat.clone(), v.id.clone(), v.video, v.gif, v.state, v.fav);
     let found = app.msgs.get(&chat).and_then(|l| l.iter().find(|m| m.id == id)).filter(|m| m.media.is_some()).cloned();
     let cell = app.picker.as_ref().map(|p| p.font_size()).map(|s| (s.width as u32, s.height as u32));
     let (Some(m), Some(cell)) = (found, cell) else {
@@ -280,10 +309,14 @@ pub fn draw(f: &mut Frame, app: &mut App) -> bool {
 
     // The top bar: who sent it and when on the left, the keys on the right.
     let bar = Rect { height: 2.min(area.height), ..area };
-    let hints = HINTS;
+    // A sticker's favorite hint first, once the bridge has said which.
+    let fav = fav.map(|on| ("f", if on { "desfavoritar" } else { "favoritar" }));
+    let hints: Vec<(&str, &str)> = fav.into_iter().chain(HINTS).collect();
     let hint_w = |(k, l): (&str, &str)| (k.width() + 3 + l.width()) as u16;
     let mut x = area.right().saturating_sub(2 + hints.iter().map(|&h| hint_w(h) + 3).sum::<u16>() - 3);
+    let first = x;
     let mut btns = [Rect::default(); 4];
+    let mut fav_btn = Rect::default();
     for (n, &(k, l)) in hints.iter().enumerate() {
         let w = hint_w((k, l));
         let r = Rect::new(x, bar.y, w, 1).intersection(area);
@@ -294,7 +327,10 @@ pub fn draw(f: &mut Frame, app: &mut App) -> bool {
             Span::styled(format!(" {l}"), Style::new().fg(META_IN)),
         ];
         f.render_widget(Paragraph::new(Line::from(spans)), r);
-        btns[n] = r;
+        match n.checked_sub(fav.is_some() as usize) {
+            Some(i) => btns[i] = r,
+            None => fav_btn = r,
+        }
         x += w + 3;
     }
     let group = chat.ends_with("@g.us");
@@ -320,7 +356,7 @@ pub fn draw(f: &mut Frame, app: &mut App) -> bool {
     }
     let cells = avatar_cells(app);
     let text_x = area.x + 2 + cells.map_or(0, |(w, _)| w + 2);
-    let text_w = btns[0].x.saturating_sub(text_x + 2) as usize;
+    let text_w = first.saturating_sub(text_x + 2) as usize;
     f.render_widget(
         Paragraph::new(vec![
             Line::from(Span::styled(truncate(&name, text_w), Style::new().fg(TEXT).add_modifier(Modifier::BOLD))),
@@ -431,7 +467,7 @@ pub fn draw(f: &mut Frame, app: &mut App) -> bool {
     f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), r);
 
     if let Some(v) = app.viewer.as_mut() {
-        (v.media, v.bar, v.btns) = (media, bar, btns);
+        (v.media, v.bar, v.btns, v.fav_btn) = (media, bar, btns, fav_btn);
     }
     true
 }
@@ -484,7 +520,7 @@ fn pretty(p: &std::path::Path) -> String {
 }
 
 /// As big as fits in `most_cols`×`most_rows` cells, kept to its shape.
-fn fit(shape: f64, (cw, ch): (u32, u32), most_cols: u16, most_rows: u16) -> (u16, u16) {
+pub(crate) fn fit(shape: f64, (cw, ch): (u32, u32), most_cols: u16, most_rows: u16) -> (u16, u16) {
     let (cw, ch) = (cw.max(1) as f64, ch.max(1) as f64);
     let mut cols = most_cols as f64;
     let mut rows = cols * cw / shape / ch;

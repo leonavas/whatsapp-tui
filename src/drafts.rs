@@ -157,6 +157,7 @@ impl App {
     pub fn clear_drafts(&mut self) {
         self.drafts.texts.clear();
         self.attach.files.clear();
+        self.msg_menu.replies.clear();
         self.input.clear();
         self.caret = 0;
         self.save_drafts();

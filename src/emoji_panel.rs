@@ -12,6 +12,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 use std::sync::OnceLock;
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 const TABS: [(&str, &str); 8] = [
@@ -442,11 +443,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let (text, style) = if p.query.is_empty() {
         ("Pesquisar emoji".to_string(), Style::new().fg(META_IN).bg(FIELD))
     } else {
-        let mut t: Vec<char> = p.query.chars().collect();
-        while t.iter().collect::<String>().width() > room {
+        let mut t: Vec<&str> = p.query.graphemes(true).collect();
+        while t.concat().width() > room {
             t.remove(0);
         }
-        (t.into_iter().collect(), field)
+        (t.concat(), field)
     };
     let text_w = text.width().min(room);
     lines.push(Line::from(vec![

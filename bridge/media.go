@@ -45,6 +45,8 @@ type outFile struct {
 	msg  *waE2E.Message
 	// Text to send once the file's gone.
 	after string
+	// The message it replies to.
+	quote *quoting
 }
 
 var (
@@ -100,6 +102,9 @@ func (b *Bridge) sendFile(c Cmd) {
 	if o.kind == "audio" {
 		o.after = caption
 	}
+	if o.quote = b.quoting(c.Chat, c.Reply); o.quote != nil {
+		setContext(o.msg, o.quote.ctx)
+	}
 	b.storeFile(o, 0)
 	fileOnce.Do(func() {
 		go func() {
@@ -115,8 +120,10 @@ func (b *Bridge) sendFile(c Cmd) {
 func (b *Bridge) storeFile(o outFile, status int) {
 	text, _ := textOf(o.msg)
 	m := &Msg{Chat: o.cmd.Chat, ID: o.id, Sender: b.me().String(), SenderName: "Você", FromMe: true, TS: o.ts, Text: text, Status: status}
-	b.db.Exec(`INSERT INTO messages (chat, id, sender, from_me, ts, text, status) VALUES (?, ?, ?, 1, ?, ?, ?)
-		ON CONFLICT (chat, id) DO UPDATE SET text = excluded.text`, m.Chat, m.ID, m.Sender, m.TS, m.Text, status)
+	quote, quoteFrom, quoteID := o.quote.cols()
+	b.db.Exec(`INSERT INTO messages (chat, id, sender, from_me, ts, text, quote, quote_from, quote_id, status) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (chat, id) DO UPDATE SET text = excluded.text`, m.Chat, m.ID, m.Sender, m.TS, m.Text, quote, quoteFrom, quoteID, status)
+	b.quote(m, o.quote)
 	// No keys yet: it plays from the copy in the cache until it's uploaded.
 	m.Media, _ = mediaOf(o.msg)
 	b.storeMedia(m.Chat, m.ID, m.Media, nil, o.jid.String(), b.me().String())
@@ -217,7 +224,7 @@ func (b *Bridge) uploadFile(o outFile) {
 	b.setStatus(o.jid, []types.MessageID{o.id}, 1)
 	b.dirty.Store(true)
 	if o.after != "" {
-		b.send(o.cmd.Chat, o.after)
+		b.send(o.cmd.Chat, o.after, "")
 	}
 }
 

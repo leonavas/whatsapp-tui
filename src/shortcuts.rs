@@ -44,6 +44,7 @@ fn sections(app: &App) -> Vec<Section> {
                 ("Tab", "Da lista para a mensagem"),
                 ("m", "Menu da conversa"),
                 ("i", "Dados do contato ou grupo"),
+                ("I", "Foto do contato ou grupo"),
                 ("Esc", "Fechar os dados"),
                 ("Espaço", "Tocar ou pausar o último áudio"),
                 ("v", "Abrir o último vídeo"),
@@ -72,7 +73,20 @@ fn sections(app: &App) -> Vec<Section> {
                 ("Ctrl+W", "Apagar a palavra anterior"),
                 ("Ctrl+U", "Apagar a mensagem"),
                 ("↑", "Editar a última mensagem enviada"),
+                ("Alt+R", "Responder à última; de novo, à anterior"),
+                ("Esc", "Cancelar a resposta"),
                 ("Esc / Tab", "Voltar para a lista"),
+            ],
+        ),
+        (
+            "Selecionar e encaminhar",
+            vec![
+                ("↑ ↓ / k j", "Mover entre as mensagens"),
+                ("Espaço", "Marcar ou desmarcar a mensagem"),
+                ("Enter", "Encaminhar (ou apagar) as marcadas"),
+                ("Esc", "Sair da seleção"),
+                ("Enter", "Marcar a conversa, ao encaminhar"),
+                ("Alt+Enter / Ctrl+Enter", "Encaminhar para as marcadas"),
             ],
         ),
         (

@@ -88,6 +88,7 @@ The first start shows a QR code: scan it in WhatsApp on your phone, under
 | `PgUp` `PgDn` | scroll the conversation |
 | `Enter` / `Shift+Enter` | send / new line |
 | `↑` in an empty message box | edit your last message (within 15 minutes; `Esc` gives up) |
+| `Alt+R` | reply to the chat's last message; again, to the one before (`Esc` gives up) |
 | `Ctrl+B` / `Ctrl+I` | bold / italic (`Alt+B` / `Alt+I` where the terminal keeps them) |
 | `Ctrl+Shift+X` `M` `C` | strikethrough, monospace, code (`Alt+X` `Alt+M` `Alt+C` too) |
 | `Ctrl+Shift+9` | make the line a quote, or not |
@@ -107,8 +108,9 @@ and the smiley in the message box, and your name at the foot of the chat
 list; right-click a chat (or click the chevron by its time) for its menu.
 
 Hovering a message shows a chevron in its corner (a right-click does the
-same) with its menu: **Copiar**, **Editar** (yours, for 15 minutes),
-**Reagir** and **Apagar**. Apagar puts a checkbox by each message to pick
+same) with its menu: **Responder**, **Copiar**, **Editar** (yours, for 15
+minutes), **Reagir** and **Apagar**. Responder shows the message over the
+message box, with ✕ to give up; what's sent next goes as its reply. Apagar puts a checkbox by each message to pick
 more of them (`Esc` leaves, `Enter` or the trash asks); then **Apagar para
 mim**, or **Apagar para todos** when every one picked is yours, about two and
 a half days old at most, and not in the chat with yourself.

@@ -70,6 +70,16 @@ pub fn auto_update() -> bool {
     value(AUTO_UPDATE.key).is_none_or(|v| v != "false")
 }
 
+/// The chat list's width as last dragged (`divider`), as slick keeps its own.
+pub fn sidebar_width() -> Option<u16> {
+    value("sidebar_width")?.parse().ok()
+}
+
+/// The chat list dragged down to its pictures.
+pub fn sidebar_compact() -> bool {
+    value("sidebar_compact").is_some_and(|v| v == "true")
+}
+
 /// Every switch, in the dialog's order.
 pub fn opts() -> Vec<Opt> {
     SECTIONS.iter().flat_map(|(_, o)| o.iter().copied()).collect()

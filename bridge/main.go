@@ -62,6 +62,8 @@ type Msg struct {
 	Card *Card `json:"card,omitempty"`
 	// 0 pending, 1 sent, 2 delivered, 3 read.
 	Status int `json:"status"`
+	// Forwarded, how many times over (WhatsApp's forwarding score); 0 when not.
+	Forwarded int `json:"forwarded,omitempty"`
 	// Stored just now, not a new version of one we had.
 	fresh bool
 	// Its media's part, for the picture once it's shown.
@@ -111,11 +113,16 @@ type Cmd struct {
 	Quiet bool `json:"quiet"`
 	// chat_action: archive, unarchive, pin, unpin, read, unread, mute
 	// (for Secs, 0 is forever), unmute, favorite, unfavorite, clear, delete.
+	// sticker_fav: favorite or unfavorite; neither only asks.
 	Action string `json:"action"`
 	Secs   int64  `json:"secs"`
 	// delete_msgs: the messages, and whether for everyone or for you only.
 	IDs      []string `json:"ids"`
 	Everyone bool     `json:"everyone"`
+	// forward: the chats the messages (IDs, of Chat) go to.
+	To []string `json:"to"`
+	// send, send_file: the message it replies to, if any.
+	Reply string `json:"reply"`
 }
 
 var (
@@ -215,6 +222,8 @@ CREATE TABLE IF NOT EXISTS messages (
 	wa_sender TEXT NOT NULL DEFAULT '',
 	-- A business's Card, as JSON; empty for the rest.
 	card TEXT NOT NULL DEFAULT '',
+	-- Forwarded: its forwarding score, at least 1; 0 when it wasn't.
+	forwarded INTEGER NOT NULL DEFAULT 0,
 	PRIMARY KEY (chat, id)
 );
 CREATE INDEX IF NOT EXISTS messages_chat_ts ON messages (chat, ts);
@@ -240,6 +249,14 @@ CREATE TABLE IF NOT EXISTS reactions (
 	emoji TEXT NOT NULL,
 	ts INTEGER NOT NULL,
 	PRIMARY KEY (chat, id, sender)
+);
+-- Favorite stickers, as the app state has them: hash is the mutation's
+-- index (the file's SHA-256, base64), enc_hash the encrypted file's, action
+-- the StickerAction.
+CREATE TABLE IF NOT EXISTS fav_stickers (
+	hash TEXT PRIMARY KEY,
+	enc_hash TEXT NOT NULL DEFAULT '',
+	action BLOB
 );
 CREATE TABLE IF NOT EXISTS meta (
 	k TEXT PRIMARY KEY,
@@ -292,6 +309,7 @@ func main() {
 		`chats ADD COLUMN verified TEXT NOT NULL DEFAULT ''`,
 		`messages ADD COLUMN quote_from TEXT NOT NULL DEFAULT ''`,
 		`messages ADD COLUMN quote_id TEXT NOT NULL DEFAULT ''`,
+		`messages ADD COLUMN forwarded INTEGER NOT NULL DEFAULT 0`,
 	} {
 		db.Exec(`ALTER TABLE ` + col)
 	}
@@ -310,6 +328,7 @@ func main() {
 		b.wipe()
 	}
 	go b.flushChats()
+	go b.sweep()
 	go b.chatActions()
 	for range 3 {
 		go b.fetchAvatars()
@@ -350,6 +369,7 @@ func (b *Bridge) pair() {
 			case "success":
 				// A new link syncs the app state in full, events and all.
 				b.setMeta("resynced", "1")
+				b.setMeta("stickers", "1")
 				emit(map[string]any{"t": "paired"})
 				return
 			case "timeout":
@@ -379,7 +399,7 @@ func (b *Bridge) commands() {
 		case "unread":
 			go b.unread(c.Chat, c.Limit)
 		case "send":
-			go b.send(c.Chat, c.Text)
+			go b.send(c.Chat, c.Text, c.Reply)
 		case "react":
 			go b.sendReaction(c.Chat, c.ID, c.Text)
 		case "edit":
@@ -401,6 +421,12 @@ func (b *Bridge) commands() {
 			case b.avatars <- avatarReq{jid: c.Chat}:
 			default:
 			}
+		case "sticker_fav":
+			b.actions <- c
+		case "forward":
+			go b.forward(c.Chat, c.IDs, c.To)
+		case "chat_subs":
+			go b.chatSubs()
 		case "download":
 			go b.download(c.Chat, c.ID, c.Auto)
 		case "logout":
@@ -424,6 +450,7 @@ func (b *Bridge) handle(raw any) {
 		emit(map[string]any{"t": "ready", "me": b.cli.Store.ID.User, "name": b.cli.Store.PushName})
 		go b.syncGroups()
 		go b.resyncOnce()
+		go b.stickersOnce()
 		go b.bizNamesOnce()
 	case *events.LoggedOut:
 		_ = b.cli.Store.Delete(b.ctx)
@@ -501,15 +528,12 @@ func (b *Bridge) me() types.JID {
 // downloads. For a logout, from here or from the phone, and for a start
 // without a session, so a new one never shows the last one's chats.
 func (b *Bridge) wipe() {
-	for _, t := range []string{"chats", "messages", "media", "reactions", "meta"} {
+	for _, t := range []string{"chats", "messages", "media", "reactions", "fav_stickers", "meta"} {
 		b.db.Exec("DELETE FROM " + t)
 	}
 	b.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
 	b.db.Exec("VACUUM")
-	dirs := []string{filepath.Join(b.dir, "avatars")}
-	if cache, err := os.UserCacheDir(); err == nil {
-		dirs = append(dirs, filepath.Join(cache, "whatsapp-tui", "media"))
-	}
+	dirs := []string{filepath.Join(b.dir, "avatars"), mediaDir()}
 	// The folders stay: the avatar workers write into theirs.
 	for _, dir := range dirs {
 		entries, _ := os.ReadDir(dir)
@@ -655,6 +679,11 @@ func (b *Bridge) message(e *events.Message, status int) *Msg {
 	if err != nil {
 		return nil
 	}
+	// Forwarded, and how many times over: the label over its bubble.
+	if ci := contextOf(e.Message); ci.GetIsForwarded() {
+		m.Forwarded = max(int(ci.GetForwardingScore()), 1)
+		b.db.Exec(`UPDATE messages SET forwarded = ? WHERE chat = ? AND id = ?`, m.Forwarded, m.Chat, m.ID)
+	}
 	// What WhatsApp calls the chat, unless its app state already said.
 	b.db.Exec(`INSERT INTO chats (jid, last_ts, wa_jid) VALUES (?, ?, ?)
 		ON CONFLICT (jid) DO UPDATE SET last_ts = max(last_ts, excluded.last_ts),
@@ -688,6 +717,8 @@ func contextOf(m *waE2E.Message) *waE2E.ContextInfo {
 		return m.GetAudioMessage().GetContextInfo()
 	case m.GetStickerMessage() != nil:
 		return m.GetStickerMessage().GetContextInfo()
+	case m.GetDocumentMessage() != nil:
+		return m.GetDocumentMessage().GetContextInfo()
 	}
 	return nil
 }
@@ -1061,7 +1092,7 @@ func (b *Bridge) load(chat, id string) *Msg {
 
 func (b *Bridge) query(where string, args ...any) []Msg {
 	// Media's columns don't clash with what callers filter on: chat and id are the join's.
-	rows, err := b.db.Query(`SELECT chat, id, sender, push_name, from_me, ts, text, quote, quote_from, quote_id, status, card,
+	rows, err := b.db.Query(`SELECT chat, id, sender, push_name, from_me, ts, text, quote, quote_from, quote_id, status, card, forwarded,
 		COALESCE(kind, ''), COALESCE(mime, ''), COALESCE(seconds, 0), COALESCE(ptt, 0), proto
 		FROM messages LEFT JOIN media USING (chat, id) `+where, args...)
 	if err != nil {
@@ -1077,7 +1108,7 @@ func (b *Bridge) query(where string, args ...any) []Msg {
 		var md Media
 		var card string
 		var blob []byte
-		if rows.Scan(&m.Chat, &m.ID, &m.Sender, &push, &m.FromMe, &m.TS, &m.Text, &m.Quote, &m.QuoteFrom, &m.QuoteID, &m.Status, &card, &md.Kind, &md.Mime, &md.Seconds, &md.PTT, &blob) != nil {
+		if rows.Scan(&m.Chat, &m.ID, &m.Sender, &push, &m.FromMe, &m.TS, &m.Text, &m.Quote, &m.QuoteFrom, &m.QuoteID, &m.Status, &card, &m.Forwarded, &md.Kind, &md.Mime, &md.Seconds, &md.PTT, &blob) != nil {
 			continue
 		}
 		if md.Kind != "" {
@@ -1145,7 +1176,7 @@ func (b *Bridge) unread(chat string, limit int) {
 }
 
 // send shows the message right away (pending) and again once the server took it.
-func (b *Bridge) send(chat, text string) {
+func (b *Bridge) send(chat, text, reply string) {
 	text = strings.TrimSpace(text)
 	jid, err := types.ParseJID(chat)
 	if err != nil || text == "" {
@@ -1159,11 +1190,19 @@ func (b *Bridge) send(chat, text string) {
 	id := b.cli.GenerateMessageID()
 	me := b.me()
 	m := &Msg{Chat: chat, ID: id, Sender: me.String(), SenderName: "Você", FromMe: true, TS: time.Now().Unix(), Text: text}
-	b.db.Exec(`INSERT INTO messages (chat, id, sender, from_me, ts, text, status) VALUES (?, ?, ?, 1, ?, ?, 0)`, chat, id, m.Sender, m.TS, text)
+	out := &waE2E.Message{Conversation: proto.String(text)}
+	q := b.quoting(chat, reply)
+	if q != nil {
+		out = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String(text), ContextInfo: q.ctx}}
+	}
+	quote, quoteFrom, quoteID := q.cols()
+	b.db.Exec(`INSERT INTO messages (chat, id, sender, from_me, ts, text, quote, quote_from, quote_id, status) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, 0)`,
+		chat, id, m.Sender, m.TS, text, quote, quoteFrom, quoteID)
 	b.db.Exec(`INSERT INTO chats (jid, last_ts) VALUES (?, ?) ON CONFLICT (jid) DO UPDATE SET last_ts = excluded.last_ts`, chat, m.TS)
+	b.quote(m, q)
 	emit(map[string]any{"t": "message", "msg": m})
 
-	_, err = b.cli.SendMessage(b.ctx, jid, &waE2E.Message{Conversation: proto.String(text)}, whatsmeow.SendRequestExtra{ID: id})
+	_, err = b.cli.SendMessage(b.ctx, jid, out, whatsmeow.SendRequestExtra{ID: id})
 	if err != nil {
 		emit(map[string]any{"t": "error", "text": "não enviou: " + err.Error()})
 		return
@@ -1325,6 +1364,8 @@ func (b *Bridge) profile(chat string) {
 		return
 	}
 	p := map[string]any{"t": "profile", "chat": chat}
+	// The full-size picture comes after the rest, not to hold it up.
+	defer b.photo(chat, jid)
 	if jid == types.PSAJID {
 		p["name"] = "WhatsApp"
 		p["about"] = "Conta oficial do WhatsApp"
@@ -1376,9 +1417,15 @@ func (b *Bridge) profile(chat string) {
 		})
 		p["members"] = members
 	} else {
+		// A hidden number (@lid) is its number when we know it, for the
+		// saved name and to show; the about is asked as the chat is.
+		pn := b.norm(jid)
 		var c types.ContactInfo
 		if b.stored() {
 			c, _ = b.cli.Store.Contacts.GetContact(b.ctx, jid)
+			if !c.Found && pn != jid {
+				c, _ = b.cli.Store.Contacts.GetContact(b.ctx, pn)
+			}
 		}
 		p["push_name"] = c.PushName
 		verified := ""
@@ -1408,10 +1455,10 @@ func (b *Bridge) profile(chat string) {
 				break
 			}
 		}
-		if jid.Server == types.DefaultUserServer {
-			p["phone"] = jid.User
+		if pn.Server == types.DefaultUserServer {
+			p["phone"] = pn.User
 			if p["name"] == nil {
-				p["name"] = "+" + jid.User
+				p["name"] = "+" + pn.User
 			}
 		} else if p["name"] == nil {
 			p["name"] = jid.User
@@ -1421,13 +1468,6 @@ func (b *Bridge) profile(chat string) {
 		p["biz"] = biz || verified != ""
 		if addr, _ := p["address"].(string); biz && (addr != "" || lat != 0 || lon != 0) {
 			p["maps"] = mapsLink(addr, lat, lon)
-		}
-	}
-	if info, err := b.cli.GetProfilePictureInfo(ctx, jid, &whatsmeow.GetProfilePictureParams{}); err == nil && info != nil {
-		name := strings.NewReplacer("@", "_", ".", "_", ":", "_").Replace(chat)
-		path := filepath.Join(b.dir, "avatars", name+"-full.jpg")
-		if download(info.URL, path) == nil {
-			p["photo"] = path
 		}
 	}
 	emit(p)

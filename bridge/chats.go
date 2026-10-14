@@ -138,6 +138,8 @@ func (l favLog) Write(p []byte) (int, error) {
 			l.b.setMeta("fav_version", strconv.Itoa(int(r.Version)))
 			l.b.setMeta("fav_patch", r.Patch)
 		}
+	case bytes.Contains(p, []byte(`"index":["favoriteSticker"`)):
+		l.b.stickerLog(p)
 	case bytes.Contains(p, []byte(`"level":"warn"`)), bytes.Contains(p, []byte(`"level":"error"`)):
 		os.Stderr.Write(p)
 	}
@@ -329,6 +331,10 @@ func (b *Bridge) appStateEvent(raw any) {
 		b.setMeta("unarchive", on)
 		return
 	case *events.AppState:
+		if len(e.Index) > 1 && e.Index[0] == appstate.IndexFavoriteSticker {
+			b.favSticker(e.Index[1], e.GetStickerAction())
+			return
+		}
 		if len(e.Index) == 0 || e.Index[0] != appstate.IndexFavorites || e.SyncActionValue == nil || e.GetFavoritesAction() == nil {
 			return
 		}
@@ -372,6 +378,11 @@ func (b *Bridge) favID(chat string) string {
 
 func (b *Bridge) chatActions() {
 	for c := range b.actions {
+		// Favorite stickers too, in the same line.
+		if c.C == "sticker_fav" {
+			b.stickerFav(c)
+			continue
+		}
 		b.chatAction(c)
 	}
 }

@@ -28,7 +28,8 @@ fn main() {
     let status = run("go", &[]).or_else(|_| run("mise", &["exec", "--", "go"])).expect("go build of bridge/ (install Go, or mise)");
     assert!(status.success(), "building the WhatsApp bridge (bridge/) failed");
 
-    for p in ["bridge/main.go", "bridge/biz.go", "bridge/media.go", "bridge/download.go", "bridge/chats.go", "bridge/card.go", "bridge/go.mod", "bridge/go.sum", "build.rs"] {
+    // The whole folder: a new .go file counts too.
+    for p in ["bridge", "build.rs"] {
         println!("cargo:rerun-if-changed={p}");
     }
 }

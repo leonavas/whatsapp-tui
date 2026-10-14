@@ -9,7 +9,7 @@ use crate::bridge::Mention;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 /// Per-char looks from `scan`.
 pub const MARK: u16 = 1;
@@ -323,13 +323,17 @@ pub fn line(text: &str, width: usize, base: Style) -> Vec<Span<'static>> {
         // No room for code's background on one row.
         cells.push((ch, look & !(CODE | MONO)));
     }
-    if cells.iter().map(|(ch, _)| ch.width().unwrap_or(0)).sum::<usize>() > width {
-        let mut w = 0;
-        let keep = cells.iter().take_while(|(ch, _)| {
-            w += ch.width().unwrap_or(0);
-            w < width
-        });
-        let n = keep.count();
+    // Measured and cut by grapheme, so an emoji of several chars stays whole.
+    let shown: String = cells.iter().map(|&(ch, _)| ch).collect();
+    if crate::ui::clusters(&shown).map(|(_, w)| w).sum::<usize>() > width {
+        let (mut w, mut n) = (0, 0);
+        for (g, gw) in crate::ui::clusters(&shown) {
+            w += gw;
+            if w >= width {
+                break;
+            }
+            n += g.chars().count();
+        }
         cells.truncate(n);
         cells.push(('…', 0));
     }

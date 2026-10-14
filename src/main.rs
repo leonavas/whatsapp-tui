@@ -7,21 +7,25 @@
 mod app;
 mod attach;
 mod avatar;
+mod backend;
 mod bigemoji;
 mod account;
 mod bridge;
 mod chatmenu;
 mod cli;
 mod config;
+mod divider;
 mod drafts;
 mod emoji;
 mod emoji_panel;
 mod events;
+mod forward;
 mod ipc;
 mod links;
 mod markup;
 mod media;
 mod msgmenu;
+mod photo;
 mod player;
 mod react;
 mod ticks;
@@ -121,7 +125,11 @@ fn main() {
     }
     // Only in the first one; the settings turn it on and off as it runs.
     let (tray_tx, mut tray) = (tx.clone(), None::<tray::Tray>);
-    let mut term = ratatui::init();
+    // ratatui's setup (raw mode, the alternate screen, the panic hook), then
+    // its terminal on the backend that draws wide emojis right.
+    drop(ratatui::init());
+    let mut term = ratatui::Terminal::new(backend::Wide(ratatui::backend::CrosstermBackend::new(std::io::stdout())))
+        .expect("failed to initialize terminal");
     // Asks the terminal what graphics it speaks, before anything else reads
     // input. Half blocks make a smudge of a photo: those go without.
     let picker = ratatui_image::picker::Picker::from_query_stdio()

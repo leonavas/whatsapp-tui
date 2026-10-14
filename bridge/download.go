@@ -84,6 +84,7 @@ func partOf(blob []byte) *waE2E.Message {
 // downloaded; the thumbnail its message carries goes to disk once.
 func (md *Media) picture(chat, id string, part *waE2E.Message) {
 	path := mediaFile(chat, id, md.Mime)
+	touch(path, path+".thumb.jpg", path+".frame.jpg")
 	if st, err := os.Stat(path); err == nil && st.Size() > 0 {
 		md.File = path
 	}
@@ -209,14 +210,48 @@ func extOf(mimeType string) string {
 	return "bin"
 }
 
-// mediaFile is where a message's media goes: ~/.cache/whatsapp-tui/media/<chat>_<id>.<ext>.
-func mediaFile(chat, id, mimeType string) string {
+// mediaDir is where the media goes: ~/.cache/whatsapp-tui/media.
+func mediaDir() string {
 	dir, err := os.UserCacheDir()
 	if err != nil {
 		dir = os.TempDir()
 	}
+	return filepath.Join(dir, "whatsapp-tui", "media")
+}
+
+// mediaFile is where a message's media goes: <mediaDir>/<chat>_<id>.<ext>.
+func mediaFile(chat, id, mimeType string) string {
 	name := strings.NewReplacer("@", "_", ".", "_", ":", "_", "/", "_").Replace(chat + "_" + id)
-	return filepath.Join(dir, "whatsapp-tui", "media", name+"."+extOf(mimeType))
+	return filepath.Join(mediaDir(), name+"."+extOf(mimeType))
+}
+
+// Media and profile pictures not seen in this long leave the disk: the keys
+// stay in the database, so they're fetched again when they're wanted.
+const keepUnseen = 7 * 24 * time.Hour
+
+// touch marks files as just seen: their mtime is when they last showed.
+// Missing ones are left alone.
+func touch(paths ...string) {
+	now := time.Now()
+	for _, p := range paths {
+		os.Chtimes(p, now, now)
+	}
+}
+
+// sweep removes, at start and once a day, the media not seen and the
+// profile pictures not asked for (fetched at most daily) in keepUnseen.
+func (b *Bridge) sweep() {
+	for {
+		for _, dir := range []string{mediaDir(), filepath.Join(b.dir, "avatars")} {
+			entries, _ := os.ReadDir(dir)
+			for _, e := range entries {
+				if info, err := e.Info(); err == nil && !e.IsDir() && time.Since(info.ModTime()) > keepUnseen {
+					os.Remove(filepath.Join(dir, e.Name()))
+				}
+			}
+		}
+		time.Sleep(24 * time.Hour)
+	}
 }
 
 func writeFile(path string, data []byte) error {
@@ -310,6 +345,7 @@ func (b *Bridge) download(chat, id string, auto bool) {
 		}
 	}
 	if st, err := os.Stat(path); mimeType != "" && err == nil && st.Size() > 0 {
+		touch(path, path+".frame.jpg")
 		done()
 		return
 	}

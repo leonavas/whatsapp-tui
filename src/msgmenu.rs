@@ -1,33 +1,37 @@
 //! A message's menu, WhatsApp Web's chevron in the corner of the hovered
-//! bubble (or a right-click on it): copy, edit yours, react, delete. Delete
-//! goes into selecting messages, a checkbox by each, and asks whether for
-//! you or for everyone, the latter only where WhatsApp allows it: your own
-//! messages, recent enough, not in the chat with yourself.
+//! bubble (or a right-click on it): reply, copy, edit yours, react, forward,
+//! delete. A reply waits over the message box, one per chat, until sent.
+//! Delete goes into selecting messages, a checkbox by each, and asks whether
+//! for you or for everyone, the latter only where WhatsApp allows it: your
+//! own messages, recent enough, not in the chat with yourself. Forward
+//! selects the same way, then asks where to (`forward`).
 
 use crate::app::{App, Phase};
 use crate::attach::{MENU_BG, MENU_HOVER};
 use crate::bridge::Msg;
 use crate::chatmenu::{boxed, separator};
 use crate::react::SMILEY;
-use crate::ui::{green, truncate, CAP_L, CAP_R, DAY_PILL, META_IN, TEXT};
-use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crate::ui::{box_corners, display_name, draw_deco, green, name_color, truncate, wrap, BL, CAP_L, CAP_R, DAY_PILL, META_IN, TEXT, TL};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 use serde_json::json;
+use std::collections::HashMap;
 use std::io::Write;
 use unicode_width::UnicodeWidthStr;
 
 // Nerd Font icons.
 const CHEVRON: &str = "\u{f107}";
+const REPLY: &str = "\u{f112}";
 const COPY: &str = "\u{f0c5}";
 const EDIT: &str = "\u{f040}";
 const TRASH: &str = "\u{f1f8}";
 const CLOSE: &str = "\u{f00d}";
-const BOX_OFF: &str = "\u{f0131}";
-const BOX_ON: &str = "\u{f0135}";
+pub(crate) const BOX_OFF: &str = "\u{f0131}";
+pub(crate) const BOX_ON: &str = "\u{f0135}";
 
 /// The column the checkboxes take while selecting.
 pub const CHECK_W: u16 = 6;
@@ -46,9 +50,11 @@ const EDITED: &str = " (editada)";
 
 #[derive(Clone, Copy, PartialEq)]
 enum Act {
+    Reply,
     Copy,
     Edit,
     React,
+    Forward,
     Sep,
     Delete,
 }
@@ -74,6 +80,10 @@ struct Popup {
 pub struct Select {
     pub chat: String,
     pub ids: Vec<String>,
+    /// To forward, not to delete: only what can go is picked.
+    pub forward: bool,
+    /// The message Space picks, moved by ↑↓.
+    pub at: Option<String>,
 }
 
 /// One of your messages being edited in the message box; what was typed
@@ -92,6 +102,10 @@ pub struct MsgMenu {
     /// The delete dialog over the selection, with its highlighted button.
     confirm: Option<Choice>,
     pub editing: Option<Editing>,
+    /// "Encaminhar": the dialog of chats to forward the selection to.
+    pub fwd: crate::forward::Forward,
+    /// The message each chat's next message replies to.
+    pub replies: HashMap<String, String>,
     // Where the last draw put things, for the mouse.
     chevron: Option<(Rect, String)>,
     rows: Vec<(Rect, Act)>,
@@ -99,6 +113,7 @@ pub struct MsgMenu {
     close_btn: Rect,
     trash_btn: Rect,
     edit_close: Rect,
+    reply_close: Rect,
     dialog: Rect,
     buttons: Vec<(Rect, Choice)>,
 }
@@ -117,6 +132,22 @@ fn revoked(m: &Msg) -> bool {
     m.media.is_none() && m.text.starts_with(REVOKED)
 }
 
+/// What the bridge writes for a message whose content it didn't keep (a
+/// contact, a place, a poll, media from before the keys were kept).
+const LABELS: [&str; 8] = ["📷 Foto", "🎥 Vídeo", "🎤 Áudio", "📄 ", "💟 Figurinha", "👤 ", "📍 Localização", "📊 "];
+
+/// Whether it can be forwarded: not deleted nor a business's card, its
+/// media with keys (ours once uploaded), its content kept.
+pub(crate) fn forwardable(m: &Msg) -> bool {
+    if m.card.is_some() || revoked(m) {
+        return false;
+    }
+    match &m.media {
+        Some(_) => !m.unavailable && !(m.from_me && m.status == 0),
+        None => !m.text.trim().is_empty() && !LABELS.iter().any(|l| m.text.starts_with(l)),
+    }
+}
+
 /// The text a copy takes: a photo's or a file's caption, not its label.
 fn plain(m: &Msg) -> String {
     let t = m.text.strip_suffix(EDITED).unwrap_or(&m.text);
@@ -129,9 +160,11 @@ fn plain(m: &Msg) -> String {
 
 fn label(a: Act) -> (&'static str, &'static str) {
     match a {
+        Act::Reply => (REPLY, "Responder"),
         Act::Copy => (COPY, "Copiar"),
         Act::Edit => (EDIT, "Editar"),
         Act::React => (SMILEY, "Reagir"),
+        Act::Forward => (crate::forward::ICON, "Encaminhar"),
         Act::Delete => (TRASH, "Apagar"),
         Act::Sep => ("", ""),
     }
@@ -183,6 +216,9 @@ impl App {
     fn acts(&self, chat: &str, id: &str) -> Vec<Act> {
         let Some(m) = self.find_msg(chat, id) else { return Vec::new() };
         let mut v = Vec::new();
+        if !revoked(m) && self.writable(chat) {
+            v.push(Act::Reply);
+        }
         if !plain(m).is_empty() {
             v.push(Act::Copy);
         }
@@ -191,6 +227,9 @@ impl App {
         }
         if !revoked(m) && self.writable(chat) {
             v.push(Act::React);
+        }
+        if forwardable(m) {
+            v.push(Act::Forward);
         }
         if !v.is_empty() {
             v.push(Act::Sep);
@@ -229,6 +268,7 @@ impl App {
         let Some(p) = self.msg_menu.popup.take() else { return };
         match a {
             Act::Sep => self.msg_menu.popup = Some(p),
+            Act::Reply => self.start_reply(&p.chat, &p.id),
             Act::Copy => {
                 let text = self.find_msg(&p.chat, &p.id).map(plain).unwrap_or_default();
                 copy(&text);
@@ -239,12 +279,60 @@ impl App {
                 let anchor = self.bubbles.iter().find(|h| h.id == p.id).map(|h| Rect { height: 1, ..h.rect });
                 self.open_react_bar(p.id, anchor.unwrap_or(Rect::new(p.at.x, p.at.y, 1, 1)));
             }
+            Act::Forward => {
+                self.cancel_edit();
+                self.msg_menu.select = Some(Select { chat: p.chat, ids: vec![p.id.clone()], forward: true, at: Some(p.id) });
+                self.msg_menu.confirm = None;
+            }
             Act::Delete => {
                 self.cancel_edit();
-                self.msg_menu.select = Some(Select { chat: p.chat, ids: vec![p.id] });
+                self.msg_menu.select = Some(Select { chat: p.chat, ids: vec![p.id.clone()], forward: false, at: Some(p.id) });
                 self.msg_menu.confirm = None;
             }
         }
+    }
+
+    /// The message the open chat's reply quotes, while it's there to quote.
+    fn reply_msg(&self) -> Option<&Msg> {
+        let chat = self.open.as_ref()?;
+        let id = self.msg_menu.replies.get(chat)?;
+        self.find_msg(chat, id).filter(|m| !revoked(m))
+    }
+
+    pub fn replying(&self) -> bool {
+        self.reply_msg().is_some()
+    }
+
+    /// "Responder": the message waits over the box, which takes the keys.
+    fn start_reply(&mut self, chat: &str, id: &str) {
+        self.cancel_edit();
+        self.msg_menu.replies.insert(chat.into(), id.into());
+        self.focus_input();
+    }
+
+    pub fn cancel_reply(&mut self) {
+        if let Some(chat) = self.open.clone() {
+            self.msg_menu.replies.remove(&chat);
+        }
+    }
+
+    /// Sending: the message the chat's reply quotes, if it's still there.
+    pub fn take_reply(&mut self, chat: &str) -> Option<String> {
+        let id = self.msg_menu.replies.remove(chat)?;
+        self.find_msg(chat, &id).filter(|m| !revoked(m)).map(|m| m.id.clone())
+    }
+
+    /// Alt+R: a reply to the last message; again, to the one before.
+    fn reply_step(&mut self) {
+        let Some(chat) = self.open.clone() else { return };
+        if !self.writable(&chat) {
+            return;
+        }
+        let list: Vec<&Msg> = self.msgs.get(&chat).map(|l| l.iter().filter(|m| !revoked(m)).collect()).unwrap_or_default();
+        let cur = self.reply_msg().map(|m| m.id.clone());
+        let at = cur.and_then(|id| list.iter().position(|m| m.id == id)).unwrap_or(list.len());
+        let Some(id) = at.checked_sub(1).map(|i| list[i].id.clone()) else { return };
+        self.start_reply(&chat, &id);
     }
 
     /// Up in an empty message box: your last message, if it can still be edited.
@@ -305,13 +393,36 @@ impl App {
     }
 
     fn toggle_pick(&mut self, id: &str) {
-        if let Some(s) = self.msg_menu.select.as_mut() {
+        let ok = self.msg_menu.select.as_ref().is_some_and(|s| !s.forward || self.find_msg(&s.chat, id).is_some_and(forwardable));
+        if let Some(s) = self.msg_menu.select.as_mut().filter(|_| ok) {
+            s.at = Some(id.to_string());
             match s.ids.iter().position(|x| x == id) {
                 Some(i) => {
                     s.ids.remove(i);
                 }
                 None => s.ids.push(id.to_string()),
             }
+        }
+    }
+
+    /// ↑↓ while selecting: the message Space picks, the ones it can pick
+    /// only; off screen, it's brought to the middle.
+    fn pick_step(&mut self, delta: isize) {
+        let Some(s) = self.msg_menu.select.as_ref() else { return };
+        let ids: Vec<&str> = self.msgs.get(&s.chat).map(|l| l.iter().filter(|m| !s.forward || forwardable(m)).map(|m| m.id.as_str()).collect()).unwrap_or_default();
+        let Some(last) = ids.len().checked_sub(1) else { return };
+        let i = match s.at.as_ref().and_then(|a| ids.iter().position(|x| x == a)) {
+            Some(i) => (i as isize + delta).clamp(0, last as isize) as usize,
+            None => last,
+        };
+        let id = ids[i].to_string();
+        let area = self.msgs_area;
+        let whole = self.bubbles.iter().find(|h| h.id == id).is_some_and(|h| h.rect.y > area.y && h.rect.bottom() < area.bottom());
+        if !whole {
+            self.jump = Some(id.clone());
+        }
+        if let Some(s) = self.msg_menu.select.as_mut() {
+            s.at = Some(id);
         }
     }
 
@@ -368,6 +479,9 @@ impl App {
 
     /// The menu's, the dialog's and the selection's keys. True when taken.
     pub fn msg_menu_key(&mut self, k: KeyEvent) -> bool {
+        if self.msg_menu.fwd.picker.is_some() {
+            return self.forward_key(k);
+        }
         let go = matches!(k.code, KeyCode::Enter | KeyCode::Char(' '));
         if let Some(p) = self.msg_menu.popup.as_ref() {
             let items = self.acts(&p.chat, &p.id);
@@ -397,10 +511,23 @@ impl App {
             }
             return true;
         }
-        if self.msg_menu.select.is_some() {
+        if self.msg_menu.select.is_none() && k.modifiers.contains(KeyModifiers::ALT) && matches!(k.code, KeyCode::Char('r' | 'R')) {
+            self.reply_step();
+            return true;
+        }
+        if let Some(s) = self.msg_menu.select.as_ref() {
+            let forward = s.forward;
             match k.code {
                 KeyCode::Esc => self.msg_menu.select = None,
-                KeyCode::Enter | KeyCode::Delete | KeyCode::Backspace => self.ask_delete(),
+                KeyCode::Up | KeyCode::Char('k') => self.pick_step(-1),
+                KeyCode::Down | KeyCode::Char('j') => self.pick_step(1),
+                KeyCode::Char(' ') => {
+                    if let Some(id) = s.at.clone() {
+                        self.toggle_pick(&id);
+                    }
+                }
+                KeyCode::Enter if forward => self.open_forward(),
+                KeyCode::Enter | KeyCode::Delete | KeyCode::Backspace if !forward => self.ask_delete(),
                 // The conversation still scrolls.
                 KeyCode::PageUp | KeyCode::PageDown => return false,
                 _ => {}
@@ -413,6 +540,9 @@ impl App {
     /// The chevron, a right-click on a bubble, the menu, the dialog and the
     /// selection's clicks. True when the event was theirs.
     pub fn msg_menu_mouse(&mut self, m: MouseEvent) -> bool {
+        if self.msg_menu.fwd.picker.is_some() {
+            return self.forward_mouse(m);
+        }
         let at = Position::new(m.column, m.row);
         let down = matches!(m.kind, MouseEventKind::Down(_));
         let left = m.kind == MouseEventKind::Down(MouseButton::Left);
@@ -460,7 +590,11 @@ impl App {
             if left && menu.close_btn.contains(at) {
                 self.msg_menu.select = None;
             } else if left && menu.trash_btn.contains(at) {
-                self.ask_delete();
+                if menu.select.as_ref().is_some_and(|s| s.forward) {
+                    self.open_forward();
+                } else {
+                    self.ask_delete();
+                }
             } else if self.newest_btn.contains(at) || !(self.msgs_area.contains(at) || self.input_area.contains(at)) {
                 return false;
             } else if left {
@@ -478,6 +612,10 @@ impl App {
             }
             if self.msg_menu.editing.is_some() && self.msg_menu.edit_close.contains(at) {
                 self.cancel_edit();
+                return true;
+            }
+            if self.replying() && self.msg_menu.reply_close.contains(at) {
+                self.cancel_reply();
                 return true;
             }
         }
@@ -551,9 +689,13 @@ pub fn draw_chevron(f: &mut Frame, app: &mut App) {
 pub fn draw_checks(f: &mut Frame, app: &mut App, area: Rect) {
     let Some(s) = app.msg_menu.select.as_ref() else { return };
     for h in &app.bubbles {
+        // Forwarding, what can't go has no checkbox.
+        if s.forward && !app.find_msg(&s.chat, &h.id).is_some_and(forwardable) {
+            continue;
+        }
         let on = s.ids.contains(&h.id);
         if on {
-            for y in h.rect.y..h.rect.bottom() {
+            for y in crate::ui::lit_rows(h.rect, area, app.picker.is_some()) {
                 for x in area.left()..area.right() {
                     let cell = &mut f.buffer_mut()[(x, y)];
                     if cell.bg == Color::Reset {
@@ -565,20 +707,31 @@ pub fn draw_checks(f: &mut Frame, app: &mut App, area: Rect) {
         let (glyph, fg) = if on { (BOX_ON, green()) } else { (BOX_OFF, META_IN) };
         let y = h.rect.y + h.rect.height.saturating_sub(1) / 2;
         f.buffer_mut()[(area.x + 2, y)].set_symbol(glyph).set_fg(fg);
+        // The one Space picks.
+        if s.at.as_ref() == Some(&h.id) {
+            f.buffer_mut()[(area.x, y)].set_symbol("▸").set_fg(green());
+        }
     }
 }
 
-/// Instead of the message box while selecting: ✕, how many, the trash.
+/// Instead of the message box while selecting: ✕, how many, the trash (or
+/// forwarding, the forward button).
 pub fn draw_select_bar(f: &mut Frame, app: &mut App, area: Rect) {
     let n = app.msg_menu.select.as_ref().map_or(0, |s| s.ids.len());
+    let forward = app.msg_menu.select.as_ref().is_some_and(|s| s.forward);
     let bg = Style::new().bg(DAY_PILL);
-    let count = if n == 1 { "1 selecionada".to_string() } else { format!("{n} selecionadas") };
+    let count = match n {
+        1 => "1 selecionada".to_string(),
+        0 if forward => "Selecionar mensagens".to_string(),
+        _ if forward => format!("{n} itens selecionados"),
+        _ => format!("{n} selecionadas"),
+    };
     let trash = if n > 0 { bg.fg(TEXT) } else { bg.fg(META_IN) };
     let w = area.width as usize;
     let used = 8 + count.width();
     let mut mid = vec![Span::styled("   ", bg), Span::styled(CLOSE, bg.fg(TEXT)), Span::styled("    ", bg), Span::styled(count, bg.fg(TEXT))];
     mid.push(Span::styled(" ".repeat(w.saturating_sub(used + 4)), bg));
-    mid.push(Span::styled(TRASH, trash));
+    mid.push(Span::styled(if forward { crate::forward::ICON } else { TRASH }, trash));
     mid.push(Span::styled("   ", bg));
     let blank = Line::from(Span::styled(" ".repeat(w), bg));
     let mut lines = vec![blank.clone(); area.height as usize];
@@ -609,6 +762,64 @@ pub fn draw_edit_strip(f: &mut Frame, app: &mut App, area: Rect) {
     app.msg_menu.edit_close = Rect::new(area.right().saturating_sub(5), area.y, 3, 1);
 }
 
+/// What a reply shows over the message box, its text `width` wide: who
+/// wrote the message, in their color, and up to two lines of it. None
+/// while editing, which has the box.
+fn reply_view(app: &App, width: usize) -> Option<(String, Color, Vec<String>)> {
+    if app.open.as_ref().is_some_and(|c| app.msg_menu.editing(c)) {
+        return None;
+    }
+    let m = app.reply_msg()?;
+    let who = if m.from_me { "Você".to_string() } else { display_name(&m.sender_name, &m.sender) };
+    let text = m.text.strip_suffix(EDITED).unwrap_or(&m.text);
+    let (text, _) = crate::markup::mentions(text, &m.mentions);
+    let mut lines = wrap(&text, width.max(1));
+    if lines.len() > 2 {
+        lines[1] = truncate(&format!("{}…", lines[1].trim_end()), width);
+    }
+    lines.truncate(2);
+    Some((who, name_color(&m.sender), lines))
+}
+
+/// Inside the message box, over the text: the reply's rows and a blank one
+/// under them; `width` is the box's area's.
+pub fn reply_rows(app: &App, width: u16) -> u16 {
+    reply_view(app, width.saturating_sub(14) as usize).map_or(0, |(_, _, l)| l.len() as u16 + 2)
+}
+
+/// The reply over the message box, as WhatsApp Web's: a bar in the author's
+/// color, their name and the message on a darker box, ✕ to stop replying.
+pub fn draw_reply(f: &mut Frame, app: &mut App, area: Rect) {
+    app.msg_menu.reply_close = Rect::default();
+    let w = area.width as usize;
+    let Some((who, color, text)) = reply_view(app, w.saturating_sub(8)) else { return };
+    let bg = Style::new().bg(DAY_PILL);
+    let close_row = text.len() / 2;
+    let rows = std::iter::once((who, bg.fg(color).add_modifier(Modifier::BOLD))).chain(text.into_iter().map(|l| (l, bg.fg(META_IN))));
+    let lines: Vec<Line> = rows
+        .enumerate()
+        .map(|(i, (s, st))| {
+            let s = truncate(&s, w.saturating_sub(8));
+            let close = if i == close_row { CLOSE } else { " " };
+            Line::from(vec![
+                Span::styled("▎ ", bg.fg(color)),
+                Span::styled(s.clone(), st),
+                Span::styled(" ".repeat(w.saturating_sub(5 + s.width())), bg),
+                Span::styled(close, bg.fg(META_IN)),
+                Span::styled("  ", bg),
+            ])
+        })
+        .collect();
+    let h = lines.len();
+    f.render_widget(Paragraph::new(lines), area);
+    if app.picker.is_some() && w > 2 {
+        for (row, col, d) in box_corners(0, h, 0, w, DAY_PILL, TL | BL) {
+            draw_deco(f, app, d, area.x + col as u16, area.y + row as u16);
+        }
+    }
+    app.msg_menu.reply_close = Rect::new(area.right().saturating_sub(4), area.y + close_row as u16, 3, 1);
+}
+
 /// The menu, and the delete dialog over the selection.
 pub fn draw(f: &mut Frame, app: &mut App) {
     // Gone from the screen: a selection or edit of another chat ends.
@@ -624,6 +835,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     draw_popup(f, app);
     draw_dialog(f, app);
+    crate::forward::draw(f, app);
 }
 
 fn draw_popup(f: &mut Frame, app: &mut App) {
