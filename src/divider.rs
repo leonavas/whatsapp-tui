@@ -5,13 +5,15 @@
 
 use crate::app::{App, Focus, Item};
 use crate::config;
-use crate::ui::{avatar_cells, dim, display_name, draw_avatar, draw_deco, green, name_color, phone, truncate, Deco, CAP_L, CAP_R, FIELD, META_IN, SEARCH, SELECTED, TEXT};
+use crate::ui::{avatar_cells, avatar_picture, dim, display_name, draw_avatar, draw_deco, green, name_color, phone, rgb, truncate, Deco, CAP_L, CAP_R, FIELD, META_IN, SEARCH, SELECTED, TEXT};
+use image::{DynamicImage, RgbaImage};
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
+use ratatui_image::{Image, Resize};
 use unicode_width::UnicodeWidthStr;
 
 /// The narrowest the whole list goes: a name and its time still read.
@@ -54,9 +56,15 @@ pub(crate) fn slot(app: &App) -> u16 {
     avatar_cells(app).filter(|_| app.settings.on(config::PHOTOS)).map_or(2, |(w, _)| w)
 }
 
-/// The narrow list: a cell, the picture, two for the unread count and a cell.
+/// The pictures are shown, and the unread counts over them.
+fn photos(app: &App) -> bool {
+    avatar_cells(app).is_some() && app.settings.on(config::PHOTOS)
+}
+
+/// The narrow list: a cell, the picture, the cell its count reaches into
+/// and a cell; without pictures, two for the count after the initials.
 fn compact_width(app: &App) -> u16 {
-    slot(app) + 5
+    slot(app) + if photos(app) { 4 } else { 5 }
 }
 
 /// The widest the list goes in `total` columns, the conversation keeping its room.
@@ -178,7 +186,81 @@ fn initials(name: &str) -> String {
     }
 }
 
-/// The unread count beside the picture, green as the list's; "…" while typing.
+/// What goes over the picture's top-right: the unread count, up to "99+",
+/// or nothing in the circle when marked as unread by hand; and its color.
+type Mark = (String, Color);
+
+fn mark(unread: u32, marked: bool, muted: bool) -> Option<Mark> {
+    let n = match unread {
+        0 => return None,
+        1 if marked => String::new(),
+        n if n > 99 => "99+".into(),
+        n => n.to_string(),
+    };
+    Some((n, if muted { META_IN } else { green() }))
+}
+
+/// The picture with the unread count over its top-right, as WhatsApp's
+/// phone app shows it: one cell wider than the picture, for the count to
+/// reach past its edge.
+fn marked_face(f: &mut Frame, app: &mut App, jid: &str, group: bool, (label, color): &Mark, x: u16, y: u16) {
+    let Some(picker) = app.picker.as_ref() else { return };
+    let w = slot(app);
+    let prefix = format!("badge:{jid}:");
+    let key = (format!("{prefix}{label}:{:?}", rgb(*color)), w + 1, 2);
+    if !app.protocols.contains_key(&key) {
+        let s = picker.font_size();
+        let (cw, ch) = (s.width as u32, s.height as u32);
+        // Where `draw_avatar` puts it: at the left, in the middle of the two rows.
+        let side = (w as u32 * cw).min(2 * ch);
+        let top = (2 * ch - side) / 2;
+        let mut img = RgbaImage::new((w as u32 + 1) * cw, 2 * ch);
+        image::imageops::overlay(&mut img, &avatar_picture(app, jid, group, side).to_rgba8(), 0, top as i64);
+        let (d, r) = (side as f32, side as f32 / 2.0);
+        let at = (r + 0.72 * r, top as f32 + r - 0.72 * r);
+        crate::badge::stamp(&mut img, label, rgb(*color), at, 0.39 * d, 0.043 * d);
+        let Some(picker) = app.picker.as_ref() else { return };
+        let Ok(p) = picker.new_protocol(DynamicImage::ImageRgba8(img), Rect::new(0, 0, w + 1, 2).into(), Resize::Fit(None)) else { return };
+        // The count it had before goes.
+        app.protocols.retain(|(k, _, _), _| !k.starts_with(&prefix));
+        app.protocols.insert(key.clone(), p);
+    }
+    f.render_widget(Image::new(&app.protocols[&key]), Rect::new(x, y, w + 1, 2));
+    app.want_avatar(jid);
+}
+
+/// The archived chats' icon as a picture, how many wait over its
+/// top-right as over a chat's picture, a bit smaller; from `x` in the row
+/// `y`, the row above it too (`up`), for the count to reach into. False
+/// without the icon's font: the text one stays.
+fn archive_face(f: &mut Frame, app: &mut App, n: u32, x: u16, y: u16, up: bool) -> bool {
+    let Some(picker) = app.picker.as_ref() else { return false };
+    let w = slot(app);
+    let label = mark(n, false, false).map(|(l, _)| l);
+    let rows = 1 + up as u16;
+    let key = (format!("archive:{label:?}:{:?}", rgb(green())), w + 1, rows);
+    if !app.protocols.contains_key(&key) {
+        let s = picker.font_size();
+        let (cw, ch) = (s.width as u32, s.height as u32);
+        let d = (w as u32 * cw).min(2 * ch) as f32;
+        let mut img = RgbaImage::new((w as u32 + 1) * cw, rows as u32 * ch);
+        // In its cell as `centered` puts the text one, its ink as tall as Ghostty draws it.
+        let (cx, cy) = (((w - 1) / 2) as f32 * cw as f32, (up as u32 * ch) as f32 + ch as f32 / 2.0);
+        let Some(ink) = crate::badge::icon(&mut img, crate::chatmenu::ARCHIVE.chars().next().unwrap_or(' '), rgb(META_IN), cx, cy, 0.65 * ch as f32, 2.0 * cw as f32) else { return false };
+        if let Some(label) = &label {
+            crate::badge::stamp(&mut img, label, rgb(green()), (ink[2] + 0.04 * d, ink[1]), d * 17.0 / 51.0, 0.043 * d);
+        }
+        let Some(picker) = app.picker.as_ref() else { return false };
+        let Ok(p) = picker.new_protocol(DynamicImage::ImageRgba8(img), Rect::new(0, 0, w + 1, rows).into(), Resize::Fit(None)) else { return false };
+        app.protocols.retain(|(k, _, _), _| !k.starts_with("archive:"));
+        app.protocols.insert(key.clone(), p);
+    }
+    f.render_widget(Image::new(&app.protocols[&key]), Rect::new(x, y - up as u16, w + 1, rows));
+    true
+}
+
+/// Without pictures: the unread count beside the initials, green as the
+/// list's; "…" while typing.
 fn badge(unread: u32, muted: bool, typing: bool) -> Vec<Span<'static>> {
     if unread > 0 {
         let n = if unread > 9 { "9+".to_string() } else { unread.to_string() };
@@ -249,7 +331,9 @@ pub fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     let inner = Rect { x: list.x + 1, width: list.width.saturating_sub(2), ..list };
     let width = inner.width as usize;
     let mut lines: Vec<Line> = Vec::new();
-    let mut faces: Vec<(u16, Option<String>, String, bool)> = Vec::new();
+    let mut faces: Vec<(u16, Option<String>, String, bool, Option<Mark>)> = Vec::new();
+    let mut archive = None;
+    let pics = photos(app);
     let mut lit_at = None;
     let mut y = list.y;
     for item in items.iter().skip(offset) {
@@ -262,16 +346,26 @@ pub fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         let mut first = vec![Span::raw(" ")];
         match item {
             Item::Chat(c) => {
+                let typing = app.typing.contains_key(&c.jid);
                 first.push(Span::raw(" ".repeat(w as usize)));
-                first.extend(badge(c.unread, c.muted, app.typing.contains_key(&c.jid)));
-                faces.push((y, Some(c.jid.clone()), display_name(&c.name, &c.jid), c.group));
+                if !pics {
+                    first.extend(badge(c.unread, c.muted, typing));
+                } else if c.unread == 0 && typing {
+                    first.push(Span::styled("…", Style::new().fg(green())));
+                }
+                let m = mark(c.unread, c.marked, c.muted).filter(|_| pics);
+                faces.push((y, Some(c.jid.clone()), display_name(&c.name, &c.jid), c.group, m));
             }
-            Item::Contact(c) => faces.push((y, Some(c.jid.clone()), c.name.clone(), false)),
-            Item::Number(n) => faces.push((y, Some(n.jid.clone()), phone(&n.jid), false)),
+            Item::Contact(c) => faces.push((y, Some(c.jid.clone()), c.name.clone(), false, None)),
+            Item::Number(n) => faces.push((y, Some(n.jid.clone()), phone(&n.jid), false, None)),
             Item::Archived => {
                 let n = app.chats.iter().filter(|c| c.archived && c.unread > 0).count() as u32;
                 first.extend(centered(crate::chatmenu::ARCHIVE, Style::new().fg(META_IN), w));
-                first.extend(badge(n, false, false));
+                if pics {
+                    archive = Some((y, n));
+                } else {
+                    first.extend(badge(n, false, false));
+                }
             }
             Item::Back => first.extend(centered("←", Style::new().fg(TEXT).bold(), w)),
             Item::Header(_) => first.push(Span::styled("─".repeat(w as usize), dim())),
@@ -307,8 +401,20 @@ pub fn sidebar(f: &mut Frame, app: &mut App, area: Rect) {
             draw_deco(f, app, Deco::Edge(false, cols, SELECTED), x0, top - 1);
         }
     }
-    for (y, jid, name, group) in faces {
-        face(f, app, jid.as_deref(), &name, group, inner.x + 1, y);
+    for (y, jid, name, group, mark) in faces {
+        match (jid, mark) {
+            (Some(jid), Some(m)) => marked_face(f, app, &jid, group, &m, inner.x + 1, y),
+            (jid, _) => face(f, app, jid.as_deref(), &name, group, inner.x + 1, y),
+        }
+    }
+    // Over the gap under the search when it's the first row, as it always is.
+    if let Some((y, n)) = archive {
+        let up = y == list.y && y > area.y;
+        if !archive_face(f, app, n, inner.x + 1, y, up) && n > 0 {
+            // No icon to draw: the count as without pictures, where it fits.
+            let r = Rect::new(inner.x + 1 + w, y, 1, 1).intersection(f.area());
+            f.render_widget(Paragraph::new(Span::styled(if n > 9 { "+".into() } else { n.to_string() }, Style::new().fg(green()).bold())), r);
+        }
     }
 }
 

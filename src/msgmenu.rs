@@ -46,7 +46,7 @@ const REVOKE_SECS: i64 = 60 * 3600;
 /// What the bridge writes for a deleted or edited message.
 const REVOKED: &str = "🚫 ";
 const REVOKED_MINE: &str = "🚫 Você apagou esta mensagem";
-const EDITED: &str = " (editada)";
+pub(crate) const EDITED: &str = " (editada)";
 
 #[derive(Clone, Copy, PartialEq)]
 enum Act {
@@ -149,7 +149,7 @@ pub(crate) fn forwardable(m: &Msg) -> bool {
 }
 
 /// The text a copy takes: a photo's or a file's caption, not its label.
-fn plain(m: &Msg) -> String {
+pub(crate) fn plain(m: &Msg) -> String {
     let t = m.text.strip_suffix(EDITED).unwrap_or(&m.text);
     match &m.media {
         Some(_) => t.split_once(" · ").map(|(_, c)| c.to_string()).unwrap_or_default(),
@@ -629,7 +629,7 @@ impl App {
 }
 
 /// Copies to the clipboard: wl-copy or xclip, else the terminal's OSC 52.
-fn copy(text: &str) {
+pub(crate) fn copy(text: &str) {
     use std::process::{Command, Stdio};
     let mut cmd = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         Command::new("wl-copy")

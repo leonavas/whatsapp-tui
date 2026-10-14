@@ -59,6 +59,11 @@ pub fn glow(k: f32) -> Color {
     rgb(mix(bg, g, 0.22 * k.clamp(0.0, 1.0)))
 }
 
+/// Behind text selected with the mouse: stronger than your bubbles.
+pub fn selection() -> Color {
+    shade(0x2A7A5A, |g, bg| mix(bg, g, 0.6))
+}
+
 /// Your bubbles.
 pub fn bubble_out() -> Color {
     shade(0x144D37, |g, bg| mix(bg, g, 0.3))

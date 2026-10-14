@@ -245,6 +245,8 @@ pub struct App {
     pub expanded: HashSet<(String, String)>,
     /// The "Ler mais" on screen: where, its message and how many rows it grows by.
     pub more_hits: Vec<(Rect, String, usize)>,
+    /// Text selected in the conversation with the mouse.
+    pub text_sel: crate::select::TextSel,
     pub audio_hits: Vec<AudioHit>,
     pub player: crate::player::Player,
     /// Photos and videos on screen.
@@ -344,6 +346,7 @@ impl App {
             msg_links: Vec::new(),
             expanded: HashSet::new(),
             more_hits: Vec::new(),
+            text_sel: Default::default(),
             newest_btn: Rect::default(),
             flash: None,
             bubbles: Vec::new(),
@@ -420,6 +423,7 @@ impl App {
     }
 
     pub fn tick(&mut self) {
+        self.select_tick();
         self.typing.retain(|_, (_, at)| at.elapsed() < Duration::from_secs(6));
         if self.notice.as_ref().is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(6)) {
             self.notice = None;
@@ -860,7 +864,9 @@ impl App {
             Event::Avatar { chat, path } => {
                 let img = (!path.is_empty()).then(|| image::open(&path).ok()).flatten();
                 self.avatars.insert(chat.clone(), img.map_or(Avatar::None, Avatar::Ready));
-                self.protocols.retain(|(j, _, _), _| j != &chat);
+                // Its picture, and with an unread count over it (`badge`).
+                let counted = format!("badge:{chat}:");
+                self.protocols.retain(|(j, _, _), _| j != &chat && !j.starts_with(&counted));
             }
             Event::Media { chat, id, path, error } => {
                 if !error.is_empty() {
@@ -939,6 +945,7 @@ impl App {
                     group,
                     last_ts: m.ts,
                     unread: u32::from(new && !seen),
+                    marked: false,
                     pinned: false,
                     pin_ts: 0,
                     archived: false,
@@ -1133,6 +1140,10 @@ impl App {
             return;
         }
         let page = (self.msgs_area.height as usize / 2).max(1);
+        if k.code == KeyCode::Esc && self.text_sel.active() {
+            self.text_sel.clear();
+            return;
+        }
         if k.code == KeyCode::Esc && self.profile.is_some() {
             self.profile = None;
             return;
@@ -1392,9 +1403,14 @@ impl App {
     }
 
     fn mouse(&mut self, m: MouseEvent) {
-        // The divider being dragged keeps the mouse until let go.
-        if self.divider_held(m) {
+        // The divider being dragged keeps the mouse until let go; so does a
+        // selection being dragged over the messages.
+        if self.divider_held(m) || self.select_held(m) {
             return;
+        }
+        // A click anywhere drops the selection; one on text may start another.
+        if matches!(m.kind, MouseEventKind::Down(_)) {
+            self.text_sel.clear();
         }
         if self.viewer_mouse(m) || self.photo_mouse(m) || self.who_mouse(m) || self.chat_menu_mouse(m) || self.account_mouse(m) || self.msg_menu_mouse(m) || self.emoji_panel_mouse(m) || self.emoji_click(m) || self.attach_mouse(m) || self.react_mouse(m) {
             return;
@@ -1486,6 +1502,8 @@ impl App {
                     self.show_profile(jid);
                 }
             }
+            // On text but none of the above: a selection, or a double or triple click.
+            MouseEventKind::Down(MouseButton::Left) if self.msgs_area.contains(at) => self.select_press(at),
             MouseEventKind::Down(MouseButton::Left) if self.header_area.contains(at) => self.toggle_profile(),
             MouseEventKind::Down(MouseButton::Left) if self.search_area.contains(at) => self.focus = Focus::Search,
             MouseEventKind::ScrollUp if self.msgs_area.contains(at) => self.scroll += 3,

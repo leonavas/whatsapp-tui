@@ -178,7 +178,7 @@ fn first_sub(app: &App) -> Option<Item> {
 }
 
 /// Your WhatsApp name, else your number.
-fn my_name(app: &App) -> String {
+pub(crate) fn my_name(app: &App) -> String {
     if !app.me_name.is_empty() {
         return app.me_name.clone();
     }

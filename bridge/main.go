@@ -77,7 +77,9 @@ type Chat struct {
 	Group  bool   `json:"group"`
 	LastTS int64  `json:"last_ts"`
 	Unread int    `json:"unread"`
-	Pinned bool   `json:"pinned"`
+	// Marked as unread by hand: its one unread may be no message at all.
+	Marked bool `json:"marked"`
+	Pinned bool `json:"pinned"`
 	// When it was pinned: the newest pin comes first.
 	PinTS    int64  `json:"pin_ts"`
 	Archived bool   `json:"archived"`
@@ -1027,7 +1029,7 @@ func (b *Bridge) flushChats() {
 // groups we're in and the contacts we know stay out until someone writes.
 func (b *Bridge) chats() []Chat {
 	// Cleared ones stay, empty, as on the phone.
-	rows, err := b.db.Query(`SELECT c.jid, c.name, c.last_ts, c.unread, c.pinned, c.archived, c.mute_until, c.read_only, c.favorite, c.verified,
+	rows, err := b.db.Query(`SELECT c.jid, c.name, c.last_ts, c.unread, c.marked, c.pinned, c.archived, c.mute_until, c.read_only, c.favorite, c.verified,
 		COALESCE(m.text, ''), COALESCE(m.from_me, 0), COALESCE(m.status, 0), COALESCE(m.sender, ''), COALESCE(m.push_name, '')
 		FROM chats c LEFT JOIN messages m ON m.rowid = (
 			SELECT rowid FROM messages WHERE chat = c.jid ORDER BY ts DESC LIMIT 1)
@@ -1043,7 +1045,7 @@ func (b *Bridge) chats() []Chat {
 		var c Chat
 		var mute, fav int64
 		var level, sender, push string
-		if rows.Scan(&c.JID, &c.Name, &c.LastTS, &c.Unread, &c.PinTS, &c.Archived, &mute, &c.ReadOnly, &fav, &level, &c.Preview, &c.FromMe, &c.Status, &sender, &push) != nil {
+		if rows.Scan(&c.JID, &c.Name, &c.LastTS, &c.Unread, &c.Marked, &c.PinTS, &c.Archived, &mute, &c.ReadOnly, &fav, &level, &c.Preview, &c.FromMe, &c.Status, &sender, &push) != nil {
 			continue
 		}
 		jid, _ := types.ParseJID(c.JID)

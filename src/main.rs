@@ -7,6 +7,7 @@
 mod app;
 mod attach;
 mod avatar;
+mod badge;
 mod backend;
 mod bigemoji;
 mod account;
@@ -28,6 +29,7 @@ mod msgmenu;
 mod photo;
 mod player;
 mod react;
+mod select;
 mod ticks;
 mod tray;
 mod shortcuts;

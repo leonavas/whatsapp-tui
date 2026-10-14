@@ -20,6 +20,9 @@ pub struct Chat {
     pub group: bool,
     pub last_ts: i64,
     pub unread: u32,
+    /// Marked as unread by hand: its one unread may be no message at all.
+    #[serde(default)]
+    pub marked: bool,
     pub pinned: bool,
     /// When it was pinned: the last pinned comes first.
     #[serde(default)]

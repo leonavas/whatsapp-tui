@@ -234,8 +234,10 @@ pub struct Looks {
     pub dim: Color,
 }
 
-/// Rows of spans, and each link's piece as (row, col, width, url).
-pub type Rows = (Vec<Vec<Span<'static>>>, Vec<(usize, usize, usize, String)>);
+/// Rows of spans, and each link's piece as (row, col, width, url); last,
+/// each row's cells as (col, width, first char, last char) in the text, for
+/// a selection with the mouse.
+pub type Rows = (Vec<Vec<Span<'static>>>, Vec<(usize, usize, usize, String)>, Vec<Vec<(usize, usize, usize, usize)>>);
 
 /// The text in rows of `width`, as WhatsApp Web shows it: markers hidden,
 /// quotes behind a bar, list items with their bullet or number and a
@@ -247,7 +249,7 @@ pub fn rows(text: &str, width: usize, lk: &Looks, mentions: &[(usize, usize, Str
     let mut found = crate::links::find(text);
     found.extend(mentions.iter().cloned());
     let owner = |i: usize| found.iter().position(|&(a, b, _)| (a..b).contains(&i));
-    let (mut out, mut links) = (Vec::new(), Vec::new());
+    let (mut out, mut links, mut cells) = (Vec::new(), Vec::new(), Vec::new());
     let mut s = 0;
     loop {
         let e = c[s..].iter().position(|&x| x == '\n').map_or(c.len(), |p| s + p);
@@ -272,6 +274,14 @@ pub fn rows(text: &str, width: usize, lk: &Looks, mentions: &[(usize, usize, Str
                     let t = if r == 0 || kind == QUOTE { lead.clone() } else { " ".repeat(lw) };
                     spans.push(Span::styled(t, lead_style));
                 }
+                // By grapheme, as the terminal draws them.
+                let (mut col, mut k, mut row) = (lw, 0, Vec::new());
+                for (g, gw) in crate::ui::clusters(&l) {
+                    let n = g.chars().count();
+                    row.push((col, gw, shown[at[k]], shown[at[k + n - 1]]));
+                    (col, k) = (col + gw, k + n);
+                }
+                cells.push(row);
                 let chars: Vec<char> = l.chars().collect();
                 let (mut col, mut k) = (lw, 0);
                 while k < chars.len() {
@@ -302,7 +312,42 @@ pub fn rows(text: &str, width: usize, lk: &Looks, mentions: &[(usize, usize, Str
         }
         s = e + 1;
     }
-    (out, links)
+    (out, links, cells)
+}
+
+/// The chars from `a` to `b` of `text`, both in, as written: for a
+/// selection with the mouse, which only goes over what's shown. A line's
+/// prefix or a marker right outside them comes along; a marker whose pair
+/// is left out goes.
+pub fn as_written(text: &str, a: usize, b: usize) -> String {
+    let c: Vec<char> = text.chars().collect();
+    if c.is_empty() {
+        return String::new();
+    }
+    let f = scan(&c);
+    let (mut a, mut b) = (a.min(c.len() - 1), b.min(c.len() - 1));
+    while a > 0 && f[a - 1] & (MARK | LEAD) != 0 {
+        a -= 1;
+    }
+    while b + 1 < c.len() && f[b + 1] & MARK != 0 {
+        b += 1;
+    }
+    // Each marker's pair: a fence's three with the other three, the inline
+    // ones by nesting (one never nests in its own kind).
+    let mut pair = vec![usize::MAX; c.len()];
+    let mut stack: Vec<usize> = Vec::new();
+    let blocks = fences(&c);
+    for k in (0..c.len()).filter(|&k| f[k] & MARK != 0) {
+        if let Some(&(x, y)) = blocks.iter().find(|&&(x, y)| (x..y).contains(&k)) {
+            pair[k] = if k < x + 3 { y - 3 + (k - x) } else { x + (k + 3 - y) };
+        } else if stack.last().is_some_and(|&t| c[t] == c[k]) {
+            let t = stack.pop().unwrap_or(k);
+            (pair[t], pair[k]) = (k, t);
+        } else {
+            stack.push(k);
+        }
+    }
+    (a..=b).filter(|&k| f[k] & MARK == 0 || (a..=b).contains(&pair[k])).map(|k| c[k]).collect()
 }
 
 /// The text on one row, for the chat list and a reply's quote: markers

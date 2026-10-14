@@ -110,7 +110,7 @@ fn cell_px(app: &App) -> Option<(u32, u32)> {
     Some((s.width as u32, s.height as u32))
 }
 
-fn rgb(c: Color) -> [u8; 3] {
+pub(crate) fn rgb(c: Color) -> [u8; 3] {
     match c {
         Color::Rgb(r, g, b) => [r, g, b],
         _ => [0, 0, 0],
@@ -679,17 +679,22 @@ pub(crate) fn fit(img: &DynamicImage) -> Resize {
     Resize::Fit(Some(if big { ratatui_image::FilterType::Triangle } else { ratatui_image::FilterType::CatmullRom }))
 }
 
+/// The chat's picture, round, `side` pixels across.
+pub(crate) fn avatar_picture(app: &App, jid: &str, group: bool, side: u32) -> DynamicImage {
+    match app.avatars.get(jid) {
+        _ if jid == "0@s.whatsapp.net" => crate::avatar::official(side),
+        Some(Avatar::Ready(img)) => crate::avatar::round(img, side),
+        _ => crate::avatar::silhouette(side, group),
+    }
+}
+
 pub(crate) fn draw_avatar(f: &mut Frame, app: &mut App, jid: &str, group: bool, rect: Rect) {
     let Some(picker) = app.picker.as_ref() else { return };
     let key = (jid.to_string(), rect.width, rect.height);
     if !app.protocols.contains_key(&key) {
         let s = picker.font_size();
         let side = (rect.width as u32 * s.width as u32).min(rect.height as u32 * s.height as u32);
-        let mut img = match app.avatars.get(jid) {
-            _ if jid == "0@s.whatsapp.net" => crate::avatar::official(side),
-            Some(Avatar::Ready(img)) => crate::avatar::round(img, side),
-            _ => crate::avatar::silhouette(side, group),
-        };
+        let mut img = avatar_picture(app, jid, group, side);
         // In a taller box it sits in the middle, the rest see-through.
         let tall = rect.height as u32 * s.height as u32;
         if tall > side {
@@ -1260,7 +1265,7 @@ fn conversation(f: &mut Frame, app: &mut App, area: Rect) {
     let now = app.player.now.as_ref().filter(|n| n.chat == jid);
     // In a group, the sender's picture by their first bubble, as WhatsApp Web shows it.
     let faces = cells.filter(|_| group && app.settings.on(crate::config::PHOTOS)).map(|(w, _)| w);
-    let (lines, decos, starts, bigs, links, audios, pics, senders, spots) = message_lines(msgs, msgs_area.width as usize, group, faces, cell_px(app), now, &|id: &str| app.expanded.contains(&(jid.clone(), id.to_string())));
+    let (lines, decos, starts, bigs, links, audios, pics, senders, mut spots) = message_lines(msgs, msgs_area.width as usize, group, faces, cell_px(app), now, &|id: &str| app.expanded.contains(&(jid.clone(), id.to_string())));
     let h = msgs_area.height as usize;
     // From a search result: that message in the middle of the screen.
     if let Some(id) = app.jump.clone().filter(|_| loaded) {
@@ -1322,6 +1327,12 @@ fn conversation(f: &mut Frame, app: &mut App, area: Rect) {
             crate::media::draw(f, app, p, rect);
         }
     }
+    // Where each message's text is, for a selection with the mouse, lit over it.
+    let laid = spots
+        .iter_mut()
+        .map(|s| crate::select::Laid { id: s.id.clone(), top: s.top, rows: s.rows, caption: s.caption, glyphs: std::mem::take(&mut s.glyphs) })
+        .collect();
+    crate::select::draw(f, app, laid, msgs_area, start, msgs_area.y + top_pad);
     // Where the bubbles are, for the reactions and the clicks on quotes.
     app.bubbles.clear();
     app.sender_hits.clear();
@@ -1593,6 +1604,10 @@ struct Spot {
     /// A bubble's color and whether it has the tail, for its padding; None
     /// for big emojis and stickers.
     pad: Option<(Color, bool)>,
+    /// Its text's cells by row, as (row, (col, width, first char, last char)),
+    /// for a selection with the mouse; whether that text is a caption.
+    glyphs: Vec<(usize, Vec<(usize, usize, usize, usize)>)>,
+    caption: bool,
 }
 
 /// An audio bubble's player: its first row and where its icon, button and
@@ -1761,7 +1776,7 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, faces: Option<u16>, ce
             out.push(Line::from(spans));
             let (sx, sw) = (ex.min(px), (ex + ew).max(px + pw) - ex.min(px));
             let top = out.len() - 1 - eh as usize;
-            spots.push(Spot { id: m.id.clone(), top, rows: eh as usize + 1, x: sx, w: sw, from_me: m.from_me, quote: None, name: name_at, sender: m.sender.clone(), pill: None, more: None, pad: None });
+            spots.push(Spot { id: m.id.clone(), top, rows: eh as usize + 1, x: sx, w: sw, from_me: m.from_me, quote: None, name: name_at, sender: m.sender.clone(), pill: None, more: None, pad: None, glyphs: Vec::new(), caption: false });
             push_reactions(&mut out, &mut spots, m, sx, sw, width);
             prev_sender = Some(m.sender.as_str());
             continue;
@@ -1826,6 +1841,7 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, faces: Option<u16>, ce
         let audio = audio_of(m);
         let mut player = None;
         let mut more = None;
+        let mut glyphs: Vec<(usize, Vec<(usize, usize, usize, usize)>)> = Vec::new();
         let n_text = if media.is_some() && text.is_empty() {
             0
         } else if let Some(a) = &audio {
@@ -1842,7 +1858,9 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, faces: Option<u16>, ce
             let mention = Style::new().fg(if m.from_me { link_out() } else { green() }).bg(bg);
             let looks = crate::markup::Looks { base: body, link, mention, shade: if m.from_me { code_out() } else { CODE_IN }, dim: meta_fg };
             let (text, at) = crate::markup::mentions(text, &m.mentions);
-            let (mut text, mut found) = crate::markup::rows(&text, wrap, &looks, &at);
+            // "(editada)" is no text to select.
+            let len = text.chars().count().saturating_sub(if m.text.ends_with(crate::msgmenu::EDITED) { crate::msgmenu::EDITED.chars().count() } else { 0 });
+            let (mut text, mut found, mut map) = crate::markup::rows(&text, wrap, &looks, &at);
             // A long one cut on a row, "… Ler mais" under it, until that's clicked.
             if text.len() > MORE_ROWS + MORE_SLACK && !opened(&m.id) {
                 let (full, full_w) = (text.len(), text.last().map_or(0, |r| row_width(r)));
@@ -1851,11 +1869,13 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, faces: Option<u16>, ce
                     text.pop();
                 }
                 found.retain(|&(r, ..)| r < text.len());
+                map.truncate(text.len());
                 let dots = "… ";
                 more = Some((rows.len() + text.len(), dots.width(), "Ler mais".width(), full - text.len() - 1, full_w));
                 text.push(vec![Span::styled(dots, body), Span::styled("Ler mais", mention)]);
             }
             pieces.extend(found.into_iter().map(|(r, c, w, url)| (rows.len() + r, c, w, url)));
+            glyphs = map.into_iter().enumerate().map(|(r, cells)| (rows.len() + r, cells.into_iter().filter(|c| c.2 < len).collect())).collect();
             let n_text = text.len();
             rows.extend(text);
             n_text
@@ -1996,7 +2016,8 @@ fn message_lines(msgs: &[Msg], width: usize, group: bool, faces: Option<u16>, ce
         }
         let quote = (!quote_rows.is_empty()).then(|| (top + quote_rows.start, quote_rows.len()));
         let name = name_w.map(|w| (top, x + 1, w));
-        spots.push(Spot { id: m.id.clone(), top, rows: n, x, w: bw, from_me: m.from_me, quote, name, sender: m.sender.clone(), pill: None, more: more.map(|(r, c, w, grow)| (top + r, x + 1 + c, w, grow)), pad: Some((bg, first)) });
+        spots.push(Spot { id: m.id.clone(), top, rows: n, x, w: bw, from_me: m.from_me, quote, name, sender: m.sender.clone(), pill: None, more: more.map(|(r, c, w, grow)| (top + r, x + 1 + c, w, grow)), pad: Some((bg, first)),
+            glyphs: glyphs.into_iter().map(|(r, cells)| (top + r, cells.into_iter().map(|(c, w, a, b)| (x + 1 + c, w, a, b)).collect())).collect(), caption: media.is_some() });
         push_reactions(&mut out, &mut spots, m, x, bw, width);
         prev_sender = Some(m.sender.as_str());
     }
