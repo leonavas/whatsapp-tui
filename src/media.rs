@@ -165,13 +165,18 @@ pub(crate) fn contain(img: &DynamicImage, w: u32, h: u32) -> DynamicImage {
     DynamicImage::ImageRgba8(out)
 }
 
+/// The spinner's frame for now.
+pub(crate) fn spin() -> &'static str {
+    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    SPIN[(ms / 100) as usize % SPIN.len()]
+}
+
 /// The spinner over the disc in the middle of `rect`, in a cell of its color.
 pub(crate) fn spinner(f: &mut Frame, rect: Rect) {
-    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
     let (x, y) = (rect.x + rect.width / 2, rect.y + rect.height / 2);
     let disc = Color::Rgb(DISC[0], DISC[1], DISC[2]);
     if let Some(c) = f.buffer_mut().cell_mut((x, y)) {
-        c.set_symbol(SPIN[(ms / 100) as usize % SPIN.len()]).set_style(Style::new().fg(Color::White).bg(disc));
+        c.set_symbol(spin()).set_style(Style::new().fg(Color::White).bg(disc));
     }
 }
 

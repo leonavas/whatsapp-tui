@@ -1,7 +1,8 @@
 //! New versions from the GitHub releases, as in slick: looked for at
-//! start-up and every few hours, and installed over this binary when you
-//! click the button by your name, unless something else (cargo, the system's
-//! package manager, nix) owns it; then it only tells how to update. The Go
+//! start-up and every few hours, downloaded and then installed over this
+//! binary from the account menu (or the button by your name), unless
+//! something else (cargo, the system's package manager, nix) owns it; then it
+//! only tells how to update. The Go
 //! helper rides inside the binary, so the new one brings its own
 //! (`bridge::program` writes it to a new `bridge-<hash>/`).
 
@@ -11,6 +12,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::OnceLock;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const LATEST: &str = "https://api.github.com/repos/leonavas/whatsapp-tui/releases/latest";
@@ -30,36 +32,73 @@ fn tr(en: &str, pt: &str) -> String {
 /// Download links by file name.
 pub type Assets = Vec<(String, String)>;
 
+/// This machine's archive of a release, downloaded and checked, waiting to be installed.
+pub struct Package {
+    name: String,
+    tar: Vec<u8>,
+}
+
 pub enum Note {
     /// A newer release than this binary.
     Found { ver: String, assets: Assets },
+    /// How far the download is, in percent.
+    Progress(u8),
+    /// The download asked for finished: the version and its package, or why not.
+    Downloaded(Result<(String, Package), String>),
     /// The install asked for finished: the version, or why not.
     Installed(Result<String, String>),
     /// A check asked for from the menu: a newer version, none, or why not.
     Checked(Result<Option<(String, Assets)>, String>),
 }
 
-/// Where the update stands, shown as the button by your name.
+/// Where the update stands, shown in the account menu and as the button by your name.
 pub enum State {
-    /// Found; a click installs it.
+    /// Found; a click downloads it.
     Available { ver: String, assets: Assets },
-    /// Downloading and swapping the binary.
+    /// Downloading; the percent once the server tells the size.
+    Downloading { ver: String, assets: Assets, pct: Option<u8> },
+    /// Downloaded and checked; a click installs it and restarts.
+    Downloaded { ver: String, assets: Assets, pkg: Package },
+    /// Swapping the binary.
     Installing { ver: String, assets: Assets },
     /// Installed over the running binary; a restart picks it up.
     Installed(String),
 }
 
 impl State {
-    /// After a check found `ver`: kept while installing or once installed.
+    /// After a check found `ver`: kept while it works, and once downloaded
+    /// or installed unless `ver` is newer still.
     pub fn found(prev: Option<State>, ver: String, assets: Assets) -> State {
         match prev {
-            Some(s @ State::Installing { .. }) => s,
+            Some(s @ (State::Downloading { .. } | State::Installing { .. })) => s,
+            Some(s @ State::Downloaded { .. }) if !newer(&ver, s.ver()) => s,
             Some(State::Installed(v)) if !newer(&ver, &v) => State::Installed(v),
             _ => State::Available { ver, assets },
         }
     }
+
+    pub fn ver(&self) -> &str {
+        match self {
+            State::Available { ver, .. }
+            | State::Downloading { ver, .. }
+            | State::Downloaded { ver, .. }
+            | State::Installing { ver, .. }
+            | State::Installed(ver) => ver,
+        }
+    }
+
+    /// Back to a click away from downloading, after a download or an install failed.
+    pub fn retry(self) -> State {
+        match self {
+            State::Downloading { ver, assets, .. } | State::Downloaded { ver, assets, .. } | State::Installing { ver, assets } => {
+                State::Available { ver, assets }
+            }
+            s => s,
+        }
+    }
 }
 
+#[derive(Clone, Copy)]
 enum Mode {
     /// A cargo build (`target/`): nothing is checked.
     Off,
@@ -84,8 +123,14 @@ fn cargo_bin() -> PathBuf {
     std::env::var_os("CARGO_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".cargo")).join("bin")
 }
 
-/// From a release (install.sh in ~/.local/bin, or any folder you can write to) it is ours.
+/// From a release (install.sh in ~/.local/bin, or any folder you can write
+/// to) it is ours. Once per run: the menu asks on every draw.
 fn mode() -> Mode {
+    static MODE: OnceLock<Mode> = OnceLock::new();
+    *MODE.get_or_init(find_mode)
+}
+
+fn find_mode() -> Mode {
     let Some(exe) = exe().filter(|_| cfg!(target_os = "linux")) else { return Mode::Off };
     if exe.components().any(|c| c.as_os_str() == "target") {
         return Mode::Off;
@@ -104,22 +149,35 @@ fn dev() -> bool {
     std::env::var("WHATSAPP_TUI_UPDATE_DEV").is_ok_and(|v| v == "1")
 }
 
-/// None when a click can install; else how to update, for the status line.
-pub fn how() -> Option<String> {
+/// None when a click can install; else how to update, short for the menu
+/// and in full for the status line.
+fn manager() -> Option<(&'static str, String)> {
     let exe = exe().unwrap_or_default();
     let s = exe.to_string_lossy();
     let dir = exe.parent().map(|d| d.display().to_string()).unwrap_or_default();
     let msg = match mode() {
         Mode::Own => return None,
-        Mode::Off => "build de desenvolvimento: não se atualiza, compile de novo".to_string(),
-        Mode::Managed if exe.starts_with(cargo_bin()) => format!("instalado via cargo: rode cargo install --locked --git {REPO}"),
-        Mode::Managed if s.starts_with("/nix/") => "instalado via nix: atualize pelo nix".into(),
-        Mode::Managed if s.starts_with("/usr/") || s.starts_with("/opt/") => {
-            "instalado pelo sistema: atualize pelo gerenciador de pacotes".into()
+        Mode::Off => ("Compile de novo", "build de desenvolvimento: não se atualiza, compile de novo".to_string()),
+        Mode::Managed if exe.starts_with(cargo_bin()) => {
+            ("Atualize via cargo", format!("instalado via cargo: rode cargo install --locked --git {REPO}"))
         }
-        Mode::Managed => format!("{dir} não é gravável: baixe a versão nova em {REPO}/releases"),
+        Mode::Managed if s.starts_with("/nix/") => ("Atualize pelo nix", "instalado via nix: atualize pelo nix".into()),
+        Mode::Managed if s.starts_with("/usr/") || s.starts_with("/opt/") => {
+            ("Atualize pelo gerenciador", "instalado pelo sistema: atualize pelo gerenciador de pacotes".into())
+        }
+        Mode::Managed => ("Baixe do GitHub", format!("{dir} não é gravável: baixe a versão nova em {REPO}/releases")),
     };
     Some(msg)
+}
+
+/// None when a click can install; else how to update, for the status line.
+pub fn how() -> Option<String> {
+    manager().map(|(_, long)| long)
+}
+
+/// `how`, a few words for the menu.
+pub fn how_short() -> Option<&'static str> {
+    manager().map(|(short, _)| short)
 }
 
 fn writable(dir: &Path) -> bool {
@@ -151,10 +209,28 @@ fn latest() -> Result<(String, Assets), String> {
     Ok((tag, assets))
 }
 
-fn download(url: &str) -> Result<Vec<u8>, String> {
+/// `url`'s bytes, telling `progress` each new percent when the size is known.
+fn download(url: &str, progress: &dyn Fn(u8)) -> Result<Vec<u8>, String> {
     let res = ureq::get(url).set("User-Agent", NAME).call().map_err(|e| e.to_string())?;
-    let mut bytes = Vec::new();
-    res.into_reader().take(300 << 20).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    let total = res.header("Content-Length").and_then(|n| n.parse::<u64>().ok()).filter(|n| *n > 0);
+    let mut reader = res.into_reader().take(300 << 20);
+    let (mut bytes, mut buf, mut last) = (Vec::new(), vec![0; 64 << 10], None);
+    loop {
+        let n = match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.to_string()),
+        };
+        bytes.extend_from_slice(&buf[..n]);
+        if let Some(total) = total {
+            let pct = (bytes.len() as u64 * 100 / total).min(100) as u8;
+            if last != Some(pct) {
+                last = Some(pct);
+                progress(pct);
+            }
+        }
+    }
     Ok(bytes)
 }
 
@@ -163,31 +239,36 @@ fn archive(ver: &str) -> String {
     format!("{NAME}-{ver}-{}-unknown-linux-gnu.tar.gz", std::env::consts::ARCH)
 }
 
-/// Downloads this machine's archive, checks its sha256 and swaps
-/// `whatsapp-tui` for the new one; the desktop entry and icons too, where
-/// install.sh put them.
-fn install(ver: &str, assets: &[(String, String)], log: &dyn Fn(&str)) -> Result<(), String> {
-    let exe = exe().ok_or(tr("couldn't find the executable", "não achou o executável"))?;
-    let dir = exe.parent().ok_or(tr("executable without a folder", "executável sem pasta"))?;
+/// Downloads this machine's archive and checks its sha256.
+fn fetch(ver: &str, assets: &[(String, String)], log: &dyn Fn(&str), progress: &dyn Fn(u8)) -> Result<Package, String> {
     let name = archive(ver);
     let url = |n: &str| {
         assets.iter().find(|(a, _)| a == n).map(|(_, u)| u.clone()).ok_or(tr(&format!("release without {n}"), &format!("release sem {n}")))
     };
     let (tar_url, sum_url) = (url(&name)?, url(&format!("{name}.sha256"))?);
     log(&tr(&format!("downloading {name}…"), &format!("baixando {name}…")));
-    let tar = download(&tar_url)?;
-    let sum = String::from_utf8_lossy(&download(&sum_url)?).split_whitespace().next().unwrap_or("").to_lowercase();
+    let tar = download(&tar_url, progress)?;
+    let sum = String::from_utf8_lossy(&download(&sum_url, &|_| {})?).split_whitespace().next().unwrap_or("").to_lowercase();
     let got: String = Sha256::digest(&tar).iter().map(|b| format!("{b:02x}")).collect();
     if got != sum {
         return Err(tr(&format!("sha256 doesn't match ({got} ≠ {sum})"), &format!("sha256 não confere ({got} ≠ {sum})")));
     }
+    Ok(Package { name, tar })
+}
+
+/// Swaps `whatsapp-tui` for the package's; the desktop entry and icons too,
+/// where install.sh put them.
+fn put(pkg: &Package) -> Result<(), String> {
+    let exe = exe().ok_or(tr("couldn't find the executable", "não achou o executável"))?;
+    let dir = exe.parent().ok_or(tr("executable without a folder", "executável sem pasta"))?;
+    let Package { name, tar } = pkg;
     // Unpacked next to the binary, so the rename below stays on one filesystem.
     let tmp = dir.join(format!(".{NAME}-update-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
     let done = (|| {
-        std::fs::write(tmp.join(&name), &tar).map_err(|e| e.to_string())?;
-        let ok = std::process::Command::new("tar").arg("-xzf").arg(&name).current_dir(&tmp).status();
+        std::fs::write(tmp.join(name), tar).map_err(|e| e.to_string())?;
+        let ok = std::process::Command::new("tar").arg("-xzf").arg(name).current_dir(&tmp).status();
         if !ok.is_ok_and(|s| s.success()) {
             return Err(tr("tar didn't extract the package", "tar não extraiu o pacote"));
         }
@@ -276,9 +357,14 @@ pub fn check_now() -> Note {
     Note::Checked(res)
 }
 
-/// Installs `ver` for a click on the button; it blocks, so it runs in a thread.
-pub fn install_now(ver: String, assets: Assets) -> Note {
-    Note::Installed(install(&ver, &assets, &|_| {}).map(|()| ver))
+/// Downloads `ver` for a click, telling `progress` how far; it blocks, so it runs in a thread.
+pub fn download_now(ver: String, assets: Assets, progress: impl Fn(u8)) -> Note {
+    Note::Downloaded(fetch(&ver, &assets, &|_| {}, &progress).map(|pkg| (ver, pkg)))
+}
+
+/// Installs the downloaded `ver` for a click; it blocks, so it runs in a thread.
+pub fn install_now(ver: String, pkg: Package) -> Note {
+    Note::Installed(put(&pkg).map(|()| ver))
 }
 
 /// `whatsapp-tui update`: checks now and installs, telling what it does.
@@ -305,7 +391,7 @@ pub fn cli() -> i32 {
         eprintln!("whatsapp-tui {ver} available; {path} belongs to another tool (or the folder isn't writable): update through it");
         return 1;
     }
-    match install(&ver, &assets, &|s| eprintln!("{s}")) {
+    match fetch(&ver, &assets, &|s| eprintln!("{s}"), &|_| {}).and_then(|pkg| put(&pkg)) {
         Ok(()) => {
             eprintln!("updated to {ver}; a running whatsapp-tui picks it up when restarted");
             0
